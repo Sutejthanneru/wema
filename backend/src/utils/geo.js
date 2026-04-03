@@ -27,3 +27,14 @@ export function polygonsOverlap(zoneA = [], zoneB = []) {
   );
 }
 
+export function buildCirclePolygon(center, radiusKm) {
+  const latOffset = radiusKm / 111;
+  const lngOffset = radiusKm / (111 * Math.cos((center.lat * Math.PI) / 180 || 1));
+
+  return [
+    { lat: center.lat + latOffset, lng: center.lng },
+    { lat: center.lat, lng: center.lng + lngOffset },
+    { lat: center.lat - latOffset, lng: center.lng },
+    { lat: center.lat, lng: center.lng - lngOffset }
+  ];
+}

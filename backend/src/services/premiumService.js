@@ -1,6 +1,7 @@
 import { PLAN_CONFIG } from "../constants/plans.js";
 import { getCurrentSeason } from "../utils/time.js";
 import { ApiError } from "../utils/ApiError.js";
+import { Event } from "../models/Event.js";
 
 const seasonalMultiplier = {
   SUMMER: 1.08,
@@ -28,3 +29,20 @@ export function calculatePremium({ weeklyIncome, zoneRiskScore, planKey, date = 
   };
 }
 
+export async function computeZoneRiskScore({ zoneCode, city, planKey }) {
+  const plan = PLAN_CONFIG[planKey];
+  if (!plan) {
+    throw new ApiError(400, "Invalid plan selected");
+  }
+
+  const since = new Date();
+  since.setUTCMonth(since.getUTCMonth() - 6);
+
+  const relevantEvents = await Event.countDocuments({
+    detectedAt: { $gte: since },
+    eventType: { $in: plan.calamityTypes },
+    $or: [{ zoneCode }, { city }]
+  });
+
+  return Number(Math.min(relevantEvents / 10, 1.5).toFixed(2));
+}

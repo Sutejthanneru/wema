@@ -1,13 +1,5 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useAuth } from "../context/AuthContext.jsx";
-
-const riderDefaults = {
-  provider: "ZOMATO",
-  city: "Hyderabad",
-  zoneCode: "HYD-KUKATPALLY",
-  upiId: "",
-  aadhaarVerified: true
-};
 
 export default function AuthPage() {
   const { login } = useAuth();
@@ -18,11 +10,23 @@ export default function AuthPage() {
     name: "",
     email: "",
     phone: "",
+    password: "",
     role: "RIDER",
-    ...riderDefaults
+    provider: "ZOMATO",
+    city: "",
+    zoneCode: "",
+    upiId: "",
+    aadhaarVerified: false
   });
 
+  const isSignup = mode === "SIGNUP";
   const isRider = form.role === "RIDER";
+
+  useEffect(() => {
+    if (mode === "SIGNUP" && form.role !== "RIDER") {
+      setForm((current) => ({ ...current, role: "RIDER" }));
+    }
+  }, [mode, form.role]);
 
   const updateField = (key, value) => {
     setForm((current) => ({
@@ -65,7 +69,7 @@ export default function AuthPage() {
             <div className="rounded-3xl border border-slate-800 bg-slate-950/50 p-5">
               <p className="text-lg font-semibold text-white">Admin</p>
               <p className="mt-2 text-sm text-slate-300">
-                Social disruption approvals, fraud review, queue monitoring, and analytics.
+                Social disruption approvals, fraud review, queue monitoring, and analytics. Admin access is manual-only.
               </p>
             </div>
           </div>
@@ -115,15 +119,32 @@ export default function AuthPage() {
               required={mode === "SIGNUP"}
             />
 
-            <div className="grid gap-4 md:grid-cols-2">
-              <select
+            {!isSignup && form.role === "ADMIN" ? (
+              <input
                 className="w-full rounded-2xl border border-slate-800 bg-slate-950/50 px-4 py-3 text-white outline-none"
-                value={form.role}
-                onChange={(event) => updateField("role", event.target.value)}
-              >
-                <option value="RIDER">Rider</option>
-                <option value="ADMIN">Admin</option>
-              </select>
+                placeholder="Admin password"
+                type="password"
+                value={form.password}
+                onChange={(event) => updateField("password", event.target.value)}
+                required
+              />
+            ) : null}
+
+            <div className="grid gap-4 md:grid-cols-2">
+              {isSignup ? (
+                <div className="rounded-2xl border border-slate-800 bg-slate-950/50 px-4 py-3 text-sm text-slate-300">
+                  New public signups are created as riders only.
+                </div>
+              ) : (
+                <select
+                  className="w-full rounded-2xl border border-slate-800 bg-slate-950/50 px-4 py-3 text-white outline-none"
+                  value={form.role}
+                  onChange={(event) => updateField("role", event.target.value)}
+                >
+                  <option value="RIDER">Rider login</option>
+                  <option value="ADMIN">Admin login</option>
+                </select>
+              )}
 
               {isRider ? (
                 <select
@@ -136,7 +157,7 @@ export default function AuthPage() {
                 </select>
               ) : (
                 <div className="rounded-2xl border border-slate-800 bg-slate-950/50 px-4 py-3 text-sm text-slate-400">
-                  Admin access uses the same auth pipeline with elevated role claims.
+                  Admin accounts are not created here. Use a manually provisioned admin email to log in.
                 </div>
               )}
             </div>
@@ -149,14 +170,14 @@ export default function AuthPage() {
                     placeholder="City"
                     value={form.city}
                     onChange={(event) => updateField("city", event.target.value)}
-                    required
+                    required={isSignup}
                   />
                   <input
                     className="w-full rounded-2xl border border-slate-800 bg-slate-950/50 px-4 py-3 text-white outline-none"
                     placeholder="Zone code"
                     value={form.zoneCode}
                     onChange={(event) => updateField("zoneCode", event.target.value)}
-                    required
+                    required={isSignup}
                   />
                 </div>
 
@@ -165,8 +186,18 @@ export default function AuthPage() {
                   placeholder="UPI ID"
                   value={form.upiId}
                   onChange={(event) => updateField("upiId", event.target.value)}
-                  required={mode === "SIGNUP"}
+                  required={isSignup}
                 />
+
+                <label className="flex items-center gap-3 rounded-2xl border border-slate-800 bg-slate-950/50 px-4 py-3 text-sm text-slate-300">
+                  <input
+                    type="checkbox"
+                    checked={form.aadhaarVerified}
+                    onChange={(event) => updateField("aadhaarVerified", event.target.checked)}
+                    required={isSignup}
+                  />
+                  I confirm Aadhaar verification is completed
+                </label>
               </>
             ) : null}
 
@@ -185,4 +216,3 @@ export default function AuthPage() {
     </div>
   );
 }
-

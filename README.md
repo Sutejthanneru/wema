@@ -21,6 +21,19 @@ Weather Event Money Assurance is a production-shaped MVP for automated income pr
 5. Claim is auto-paid, sent to admin review, or held for rider verification
 6. Approved payouts are pushed to Razorpay UPI
 
+## Automated Triggers
+
+The backend now supports automated trigger creation for:
+
+- Heavy rain
+- Flood-like rainfall escalation
+- Extreme heat
+- Severe pollution
+- Cyclone or severe storm conditions
+- Earthquakes via public seismic feed matching
+
+Weather triggers are monitored automatically from active rider zones using OpenWeather. Earthquakes are monitored from the USGS public daily feed. Social disruptions remain admin-reviewed.
+
 ## Running Locally
 
 ### Backend
@@ -79,6 +92,7 @@ uvicorn app.main:app --reload --port 8001
 
 - Auth Service: Firebase login, JWT issuance, role propagation
 - Rider Service: plan selection, premium view, alerts, payout history, appeals
+- Policy lifecycle: active policy records and weekly premium payment records
 - Event Detection Service: weather ingest, social trigger ingest, event processing
 - Eligibility Service: strict ordered checks and payout computation
 - Fraud Service: anti-spoofing and Isolation Forest integration
@@ -88,6 +102,7 @@ uvicorn app.main:app --reload --port 8001
 ## RBAC
 
 - `verifyToken` validates JWT and loads the DB user
+
 - `requireRole("RIDER")` protects rider-only routes
 - `requireRole("ADMIN")` protects admin-only routes
 - `verifySystemSecret` protects internal automation routes
@@ -113,7 +128,28 @@ uvicorn app.main:app --reload --port 8001
 
 ### `GET /api/v1/rider/dashboard`
 
-Returns rider profile, premium estimate, active alerts, recent claims, and payout history.
+Returns rider profile, premium estimate, active alerts, recent claims, payout history, policy state, premium payments, appeals, complaints, and eligibility summary.
+
+### `POST /api/v1/rider/provider-sync`
+
+Demo-mode provider integration sync for active delivery verification.
+
+```json
+{
+  "deliveryStatus": "PICKED_UP"
+}
+```
+
+### `POST /api/v1/rider/subscribe`
+
+Activates or renews the rider policy for the current plan.
+
+```json
+{
+  "plan": "PRO",
+  "autoRenew": false
+}
+```
 
 ### `PATCH /api/v1/admin/social-triggers/:eventId/decision`
 
@@ -176,3 +212,12 @@ Weekly caps are enforced from the chosen plan:
 - Historical claim and fraud patterns
 - Cluster bursts from the same subnet or device group
 - Weather cross-verification confidence
+
+## Manual Admin Setup
+
+Create the one manual admin account:
+
+```bash
+cd backend
+npm run seed:admin -- 2300031934cseh1@gmail.com "" admin Sutej@2005
+```

@@ -44,9 +44,17 @@ export function AuthProvider({ children }) {
       profile: payload
     });
 
+    localStorage.setItem("wema_token", data.data.token);
+    const profileResponse = await api.get("/auth/me", {
+      headers: {
+        Authorization: `Bearer ${data.data.token}`
+      }
+    });
+
     const nextSession = {
       token: data.data.token,
-      user: data.data.user
+      user: profileResponse.data.data.user,
+      riderProfile: profileResponse.data.data.riderProfile
     };
 
     setSession(nextSession);

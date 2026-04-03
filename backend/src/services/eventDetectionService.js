@@ -5,6 +5,12 @@ import { EVENT_SOURCES, EVENT_STATUS } from "../constants/eventTypes.js";
 import { evaluateRiderForEvent } from "./eligibilityService.js";
 import { releasePayoutForClaim } from "./payoutService.js";
 import { env } from "../config/env.js";
+import { haversineDistanceKm } from "../utils/geo.js";
+import { normalizeCity } from "../utils/geography.js";
+
+const openWeatherClient = axios.create({
+  timeout: 6000
+});
 
 function buildSeverity(eventType, snapshot) {
   if (eventType === "CYCLONE") return { label: "SEVERE", factor: 1.5 };
@@ -15,11 +21,162 @@ function buildSeverity(eventType, snapshot) {
   return { label: "MODERATE", factor: 1.0 };
 }
 
+function buildPolygon(center, radiusKm) {
+  const latOffset = radiusKm / 111;
+  const lngOffset = radiusKm / (111 * Math.cos((center.lat * Math.PI) / 180 || 1));
+
+  return [
+    { lat: center.lat + latOffset, lng: center.lng },
+    { lat: center.lat, lng: center.lng + lngOffset },
+    { lat: center.lat - latOffset, lng: center.lng },
+    { lat: center.lat, lng: center.lng - lngOffset }
+  ];
+}
+
+async function recentMatchingEventExists({ zoneCode, city, eventType }) {
+  const fifteenMinutesAgo = new Date(Date.now() - 15 * 60 * 1000);
+  const existing = await Event.findOne({
+    zoneCode,
+    city,
+    eventType,
+    sourceType: EVENT_SOURCES.WEATHER,
+    createdAt: { $gte: fifteenMinutesAgo },
+    status: { $in: [EVENT_STATUS.APPROVED, EVENT_STATUS.PROCESSING, EVENT_STATUS.COMPLETED] }
+  }).lean();
+
+  return Boolean(existing);
+}
+
+async function fetchZoneWeatherSnapshot(zone) {
+  const [weatherResponse, airResponse] = await Promise.all([
+    openWeatherClient.get("https://api.openweathermap.org/data/2.5/weather", {
+      params: {
+        lat: zone.center.lat,
+        lon: zone.center.lng,
+        units: "metric",
+        appid: env.openWeatherApiKey
+      }
+    }),
+    openWeatherClient.get("https://api.openweathermap.org/data/2.5/air_pollution", {
+      params: {
+        lat: zone.center.lat,
+        lon: zone.center.lng,
+        appid: env.openWeatherApiKey
+      }
+    })
+  ]);
+
+  let oneCallResponse = { data: {} };
+  try {
+    oneCallResponse = await openWeatherClient.get("https://api.openweathermap.org/data/3.0/onecall", {
+      params: {
+        lat: zone.center.lat,
+        lon: zone.center.lng,
+        exclude: "minutely,daily,hourly",
+        units: "metric",
+        appid: env.openWeatherApiKey
+      }
+    });
+  } catch (_error) {
+    oneCallResponse = { data: {} };
+  }
+
+  return {
+    weather: weatherResponse.data,
+    air: airResponse.data,
+    oneCall: oneCallResponse.data
+  };
+}
+
+function deriveAutomaticWeatherEvents(zone, snapshot) {
+  const detectedEvents = [];
+  const current = snapshot.oneCall.current || snapshot.weather.main || {};
+  const weatherTags = [
+    ...(snapshot.weather.weather || []).map((item) => item.main),
+    ...((snapshot.oneCall.current?.weather || []).map((item) => item.main))
+  ];
+  const rainVolume = snapshot.weather.rain?.["1h"] || snapshot.weather.rain?.["3h"] || 0;
+  const windSpeed = snapshot.weather.wind?.speed || snapshot.oneCall.current?.wind_speed || 0;
+  const aqi = snapshot.air?.list?.[0]?.main?.aqi;
+  const pollutionComponents = snapshot.air?.list?.[0]?.components || {};
+  const approxHazardousAqi = aqi === 5 || pollutionComponents.pm2_5 >= 150 || pollutionComponents.pm10 >= 250;
+  const tempC = current.temp ?? snapshot.weather.main?.temp ?? 0;
+  const feelsLike = current.feels_like ?? snapshot.weather.main?.feels_like ?? tempC;
+  const alerts = snapshot.oneCall.alerts || [];
+
+  if (alerts.some((alert) => /cyclone|storm|hurricane/i.test(alert.event || "")) || windSpeed >= 24.5) {
+    detectedEvents.push({
+      eventType: "CYCLONE",
+      severityFactor: 1.5,
+      radiusKm: zone.radiusKm,
+      thresholdSnapshot: { windSpeed, alerts: alerts.map((alert) => alert.event) }
+    });
+  }
+
+  if (rainVolume >= 7 || weatherTags.some((tag) => ["Rain", "Thunderstorm"].includes(tag))) {
+    detectedEvents.push({
+      eventType: rainVolume >= 20 ? "FLOOD" : "HEAVY_RAIN",
+      severityFactor: rainVolume >= 20 ? 1.3 : 1.0,
+      radiusKm: zone.radiusKm,
+      thresholdSnapshot: { rainVolume, weatherTags }
+    });
+  }
+
+  if (Math.max(tempC, feelsLike) >= 45) {
+    detectedEvents.push({
+      eventType: "EXTREME_HEAT",
+      severityFactor: 1.15,
+      radiusKm: zone.radiusKm,
+      thresholdSnapshot: { tempC, feelsLike }
+    });
+  }
+
+  if (approxHazardousAqi) {
+    detectedEvents.push({
+      eventType: "SEVERE_POLLUTION",
+      severityFactor: 1.1,
+      radiusKm: zone.radiusKm,
+      thresholdSnapshot: { aqi, pollutionComponents }
+    });
+  }
+
+  return detectedEvents;
+}
+
+async function collectActiveZones() {
+  const riders = await RiderProfile.find({}).lean();
+  const zoneMap = new Map();
+
+  for (const rider of riders) {
+    if (!rider.zoneCode || !rider.city || !rider.currentGps) continue;
+
+    if (!zoneMap.has(rider.zoneCode)) {
+      zoneMap.set(rider.zoneCode, {
+        city: rider.city,
+        zoneCode: rider.zoneCode,
+        center: rider.currentGps,
+        radiusKm: 5,
+        affectedPolygon: rider.registeredZonePolygon?.length ? rider.registeredZonePolygon : buildPolygon(rider.currentGps, 5)
+      });
+    }
+  }
+
+  return [...zoneMap.values()];
+}
+
+async function fetchEarthquakeFeed() {
+  const response = await openWeatherClient.get(
+    "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_day.geojson"
+  );
+
+  return response.data?.features || [];
+}
+
 export async function ingestWeatherEvent(payload) {
   return Event.create({
     sourceType: EVENT_SOURCES.WEATHER,
     eventType: payload.eventType,
-    city: payload.city,
+    city: normalizeCity(payload.city),
     zoneCode: payload.zoneCode,
     center: payload.center,
     radiusKm: payload.radiusKm,
@@ -39,7 +196,7 @@ export async function ingestSocialEvent(payload) {
   return Event.create({
     sourceType: EVENT_SOURCES.SOCIAL,
     eventType: payload.eventType,
-    city: payload.city,
+    city: normalizeCity(payload.city),
     zoneCode: payload.zoneCode,
     center: payload.center,
     radiusKm: payload.radiusKm,
@@ -82,36 +239,166 @@ export async function processApprovedEvent(eventId) {
   return { event, results };
 }
 
-export async function runWeatherSyncStub() {
-  const syntheticEvents = [
-    {
-      eventType: "HEAVY_RAIN",
-      city: "Hyderabad",
-      zoneCode: "HYD-KUKATPALLY",
-      center: { lat: 17.4948, lng: 78.3996 },
-      radiusKm: 6,
-      affectedPolygon: [
-        { lat: 17.49, lng: 78.39 },
-        { lat: 17.5, lng: 78.41 }
-      ],
-      thresholdSnapshot: { alertLevel: "MODERATE" },
-      lossWindowStart: new Date(),
-      lossWindowEnd: new Date(Date.now() + 2 * 60 * 60 * 1000)
-    }
-  ];
-
+export async function ingestWeatherEvents(payload) {
+  const events = Array.isArray(payload) ? payload : [payload];
   const created = [];
-  for (const item of syntheticEvents) {
+
+  for (const item of events) {
     created.push(await ingestWeatherEvent(item));
   }
+
   return created;
+}
+
+export async function runAutomaticWeatherSync() {
+  if (!env.openWeatherApiKey) {
+    return [];
+  }
+
+  const zones = await collectActiveZones();
+  const createdEvents = [];
+
+  for (const zone of zones) {
+    const snapshot = await fetchZoneWeatherSnapshot(zone);
+    const autoEvents = deriveAutomaticWeatherEvents(zone, snapshot);
+
+    for (const autoEvent of autoEvents) {
+      const exists = await recentMatchingEventExists({
+        zoneCode: zone.zoneCode,
+        city: zone.city,
+        eventType: autoEvent.eventType
+      });
+
+      if (exists) {
+        continue;
+      }
+
+      const now = new Date();
+      const lossWindowEnd = new Date(now);
+      lossWindowEnd.setHours(lossWindowEnd.getHours() + 2);
+
+      const event = await ingestWeatherEvent({
+        eventType: autoEvent.eventType,
+        city: zone.city,
+        zoneCode: zone.zoneCode,
+        center: zone.center,
+        radiusKm: autoEvent.radiusKm,
+        affectedPolygon: zone.affectedPolygon,
+        thresholdSnapshot: autoEvent.thresholdSnapshot,
+        detectedAt: now,
+        lossWindowStart: now,
+        lossWindowEnd,
+        metadata: {
+          automation: "OPENWEATHER_AUTO_SYNC"
+        }
+      });
+
+      createdEvents.push(event);
+      await processApprovedEvent(event._id);
+    }
+  }
+
+  return createdEvents;
+}
+
+export async function runAutomaticEarthquakeSync() {
+  const zones = await collectActiveZones();
+  if (!zones.length) {
+    return [];
+  }
+
+  const features = await fetchEarthquakeFeed();
+  const createdEvents = [];
+
+  for (const zone of zones) {
+    const matchingQuakes = features.filter((feature) => {
+      const magnitude = feature.properties?.mag || 0;
+      const coordinates = feature.geometry?.coordinates || [];
+      const quakeCenter = {
+        lng: coordinates[0],
+        lat: coordinates[1]
+      };
+
+      return (
+        magnitude >= 4.5 &&
+        haversineDistanceKm(zone.center, quakeCenter) <= 250
+      );
+    });
+
+    for (const quake of matchingQuakes) {
+      const magnitude = quake.properties?.mag || 0;
+      const exists = await recentMatchingEventExists({
+        zoneCode: zone.zoneCode,
+        city: zone.city,
+        eventType: "EARTHQUAKE"
+      });
+
+      if (exists) {
+        continue;
+      }
+
+      const now = new Date(quake.properties?.time || Date.now());
+      const lossWindowEnd = new Date(now);
+      lossWindowEnd.setHours(lossWindowEnd.getHours() + 24);
+
+      const event = await ingestWeatherEvent({
+        eventType: "EARTHQUAKE",
+        city: zone.city,
+        zoneCode: zone.zoneCode,
+        center: zone.center,
+        radiusKm: Math.max(zone.radiusKm, 20),
+        affectedPolygon: zone.affectedPolygon,
+        thresholdSnapshot: {
+          magnitude,
+          place: quake.properties?.place
+        },
+        detectedAt: now,
+        lossWindowStart: now,
+        lossWindowEnd,
+        metadata: {
+          automation: "USGS_EARTHQUAKE_AUTO_SYNC"
+        }
+      });
+
+      createdEvents.push(event);
+      await processApprovedEvent(event._id);
+    }
+  }
+
+  return createdEvents;
+}
+
+export function startAutomaticWeatherMonitor() {
+  if (!env.openWeatherApiKey) {
+    console.log("Automatic weather monitor skipped: OPENWEATHER_API_KEY is not configured");
+    return null;
+  }
+
+  const intervalMs = Math.max(env.weatherSyncIntervalMinutes, 1) * 60 * 1000;
+
+  runAutomaticWeatherSync().catch((error) => {
+    console.error("Initial weather sync failed", error.message);
+  });
+  runAutomaticEarthquakeSync().catch((error) => {
+    console.error("Initial earthquake sync failed", error.message);
+  });
+
+  return setInterval(() => {
+    runAutomaticWeatherSync().catch((error) => {
+      console.error("Scheduled weather sync failed", error.message);
+    });
+    runAutomaticEarthquakeSync().catch((error) => {
+      console.error("Scheduled earthquake sync failed", error.message);
+    });
+  }, intervalMs);
 }
 
 export async function fetchExternalSignalsSummary() {
   const summary = {
     weatherProvider: "OpenWeather",
-    newsProvider: "NewsAPI",
-    configured: Boolean(env.openWeatherApiKey && env.newsApiKey)
+    socialEventMode: "MANUAL_ADMIN_REVIEW",
+    configured: Boolean(env.openWeatherApiKey),
+    automaticWeatherSync: Boolean(env.openWeatherApiKey)
   };
 
   if (!summary.configured) {
@@ -130,4 +417,3 @@ export async function fetchExternalSignalsSummary() {
 
   return summary;
 }
-

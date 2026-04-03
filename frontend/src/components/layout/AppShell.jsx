@@ -3,6 +3,34 @@ import { useAuth } from "../../context/AuthContext.jsx";
 export function AppShell({ children }) {
   const { session, logout } = useAuth();
 
+  if (session?.user?.role === "ADMIN") {
+    return (
+      <div className="min-h-screen">
+        <header
+          className="flex items-center justify-between px-6 py-4"
+          style={{ background: "var(--admin-surface)", borderBottom: "1px solid var(--admin-border)" }}
+        >
+          <div>
+            <p className="text-sm uppercase tracking-[0.35em]" style={{ color: "var(--admin-text-soft)" }}>
+              WEMA ADMIN
+            </p>
+            <p className="text-xl font-semibold" style={{ color: "var(--admin-text)" }}>
+              State Ops Console
+            </p>
+          </div>
+          <button
+            className="rounded-full px-4 py-2 text-sm font-semibold"
+            style={{ background: "var(--admin-accent)", color: "#fff" }}
+            onClick={logout}
+          >
+            Logout
+          </button>
+        </header>
+        {children}
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen px-4 py-6 text-slate-100 md:px-8">
       <header className="mb-6 flex flex-col gap-4 md:flex-row md:items-center md:justify-between">

@@ -24,7 +24,11 @@ const riderProfileSchema = new mongoose.Schema(
     userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, unique: true },
     provider: { type: String, enum: ["ZOMATO", "SWIGGY"], required: true },
     city: { type: String, required: true },
-    zoneCode: { type: String, required: true },
+    zoneCode: {
+      type: String,
+      required: true,
+      match: [/^\d{6}$/, "Zone code must be a 6-digit PIN"]
+    },
     registeredZonePolygon: { type: [locationPointSchema], default: [] },
     currentGps: { type: locationPointSchema, required: true },
     deviceFingerprint: { type: String, required: true },
@@ -54,6 +58,17 @@ const riderProfileSchema = new mongoose.Schema(
     earningsHistory: { type: [earningsSlotSchema], default: [] },
     historicalClaimRate: { type: Number, default: 0 },
     historicalFraudFlags: { type: Number, default: 0 },
+    declaredShift: {
+      active: { type: Boolean, default: false },
+      startedAt: Date,
+      endedAt: Date,
+      source: { type: String, default: "RIDER_DECLARED" }
+    },
+    manualFlag: {
+      flagged: { type: Boolean, default: false },
+      reason: String,
+      flaggedAt: Date
+    },
     plan: {
       type: String,
       enum: Object.keys(PLAN_CONFIG),
@@ -65,4 +80,3 @@ const riderProfileSchema = new mongoose.Schema(
 );
 
 export const RiderProfile = mongoose.model("RiderProfile", riderProfileSchema);
-
