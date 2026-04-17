@@ -19,8 +19,10 @@ async function seed() {
   await RiderProfile.create({
     userId: rider._id,
     provider: "ZOMATO",
+    partnerId: "ZOM2300033202",
+    aadhaarLast4: "1181",
     city: "Hyderabad",
-    zoneCode: "HYD-KUKATPALLY",
+    zoneCode: "500001",
     registeredZonePolygon: [
       { lat: 17.49, lng: 78.39 },
       { lat: 17.5, lng: 78.41 }

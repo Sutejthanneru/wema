@@ -6,6 +6,7 @@ const SECTION_ITEMS = [
   { key: "overview", label: "Overview" },
   { key: "payouts", label: "Payouts" },
   { key: "triggers", label: "Triggers" },
+  { key: "support", label: "Support" },
   { key: "fraud", label: "Fraud" },
   { key: "riders", label: "Riders" },
   { key: "pool", label: "Pool Health" },
@@ -160,6 +161,7 @@ export default function AdminDashboard() {
     lossHours: "2"
   });
   const [settingsDraft, setSettingsDraft] = useState(null);
+  const [complaintReviewDrafts, setComplaintReviewDrafts] = useState({});
 
   const loadDashboard = async (requestedState = selectedState) => {
     setLoading(true);
@@ -372,13 +374,20 @@ export default function AdminDashboard() {
   };
 
   const reviewComplaint = async (complaintId, approved) => {
+    const draft = complaintReviewDrafts[complaintId] || {};
     try {
       setError("");
       await api.patch(`/admin/complaints/${complaintId}/review`, {
         approved,
-        note: approved ? "Complaint resolved by operations" : "Complaint closed without action"
+        note: draft.note || (approved ? "Complaint resolved by operations" : "Complaint closed without action"),
+        adjustmentAmount: approved ? Number(draft.adjustmentAmount || 0) : 0
       });
       setMessage(`Complaint ${approved ? "resolved" : "closed"}.`);
+      setComplaintReviewDrafts((current) => {
+        const next = { ...current };
+        delete next[complaintId];
+        return next;
+      });
       await loadDashboard(selectedState);
     } catch (requestError) {
       setError(requestError?.response?.data?.message || "Unable to review complaint.");
@@ -771,6 +780,243 @@ export default function AdminDashboard() {
                     </button>
                   </div>
                 </form>
+              </AdminSection>
+            </div>
+          ) : null}
+
+          {activeSection === "support" ? (
+            <div className="space-y-6">
+              <div className="grid gap-4 md:grid-cols-2">
+                <MetricCard
+                  label="Open Appeals"
+                  value={dashboard.openAppeals?.length || 0}
+                  note="Pending manual claim reviews"
+                  accent="var(--admin-accent)"
+                />
+                <MetricCard
+                  label="Open Complaints"
+                  value={dashboard.openComplaints?.length || 0}
+                  note="Rider-raised support issues"
+                  accent="var(--admin-danger)"
+                />
+              </div>
+
+              <AdminSection title="Complaint Review" subtitle="Review rider complaints and close them with an operations decision.">
+                <div className="overflow-hidden rounded-2xl border" style={{ borderColor: "var(--admin-border)" }}>
+                  <table className="w-full text-left text-sm">
+                    <thead style={{ background: "var(--admin-surface-soft)" }}>
+                      <tr>
+                        <th className="px-4 py-3">Rider</th>
+                        <th className="px-4 py-3">Subject</th>
+                        <th className="px-4 py-3">Category</th>
+                        <th className="px-4 py-3">Status</th>
+                        <th className="px-4 py-3">Created</th>
+                        <th className="px-4 py-3">Claim Link</th>
+                        <th className="px-4 py-3">Details</th>
+                        <th className="px-4 py-3">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(dashboard.complaints || []).map((complaint) => {
+                        const riderName =
+                          complaint.riderId?.userId?.name ||
+                          complaint.riderId?.name ||
+                          complaint.riderId?.userId?.email ||
+                          "Unknown rider";
+                        const canReview = ["OPEN", "UNDER_REVIEW"].includes(complaint.status);
+                        const reviewDraft = complaintReviewDrafts[complaint._id] || {};
+
+                        return (
+                          <tr key={complaint._id} className="border-t align-top" style={{ borderColor: "var(--admin-border)" }}>
+                            <td className="px-4 py-3">{riderName}</td>
+                            <td className="px-4 py-3 font-medium">{complaint.subject}</td>
+                            <td className="px-4 py-3">{complaint.category?.replaceAll("_", " ") || "-"}</td>
+                            <td className="px-4 py-3">
+                              <Tag
+                                color={
+                                  complaint.status === "RESOLVED"
+                                    ? "var(--admin-success)"
+                                    : complaint.status === "REJECTED"
+                                      ? "var(--admin-danger)"
+                                      : "var(--admin-accent)"
+                                }
+                                soft={
+                                  complaint.status === "RESOLVED"
+                                    ? "rgba(22,163,74,0.12)"
+                                    : complaint.status === "REJECTED"
+                                      ? "rgba(220,38,38,0.12)"
+                                      : "rgba(37,99,235,0.12)"
+                                }
+                              >
+                                {complaint.status}
+                              </Tag>
+                            </td>
+                            <td className="px-4 py-3">{formatDate(complaint.createdAt)}</td>
+                            <td className="px-4 py-3">
+                              {complaint.relatedClaimId?._id ? (
+                                <div>
+                                  <p className="font-medium">{complaint.relatedClaimId.eventId?.eventType?.replaceAll("_", " ") || "Linked claim"}</p>
+                                  <p className="mt-1 text-xs admin-subtle">{formatCurrency(complaint.relatedClaimId.cappedPayout || 0)}</p>
+                                </div>
+                              ) : (
+                                <span className="text-xs admin-subtle">No linked claim</span>
+                              )}
+                            </td>
+                            <td className="px-4 py-3">
+                              <p>{complaint.message}</p>
+                              {complaint.resolutionNote ? (
+                                <p className="mt-2 text-xs admin-subtle">Resolution: {complaint.resolutionNote}</p>
+                              ) : null}
+                              {complaint.adjustmentAmount ? (
+                                <p className="mt-2 text-xs" style={{ color: "var(--admin-success)" }}>
+                                  Adjustment credited: {formatCurrency(complaint.adjustmentAmount)}
+                                </p>
+                              ) : null}
+                            </td>
+                            <td className="px-4 py-3">
+                              {canReview ? (
+                                <div className="space-y-2">
+                                  <input
+                                    className="w-full rounded-xl border px-3 py-2 text-xs"
+                                    style={{ borderColor: "var(--admin-border)", background: "var(--admin-surface-soft)" }}
+                                    placeholder="Resolution note"
+                                    value={reviewDraft.note || ""}
+                                    onChange={(event) =>
+                                      setComplaintReviewDrafts((current) => ({
+                                        ...current,
+                                        [complaint._id]: { ...current[complaint._id], note: event.target.value }
+                                      }))
+                                    }
+                                  />
+                                  {complaint.category === "WRONG_CALCULATION" ? (
+                                    <input
+                                      className="w-full rounded-xl border px-3 py-2 text-xs"
+                                      style={{ borderColor: "var(--admin-border)", background: "var(--admin-surface-soft)" }}
+                                      placeholder="Adjustment amount"
+                                      value={reviewDraft.adjustmentAmount || ""}
+                                      onChange={(event) =>
+                                        setComplaintReviewDrafts((current) => ({
+                                          ...current,
+                                          [complaint._id]: { ...current[complaint._id], adjustmentAmount: event.target.value }
+                                        }))
+                                      }
+                                    />
+                                  ) : null}
+                                  <div className="flex gap-2">
+                                    <button
+                                      className="rounded-xl px-3 py-2 text-xs font-semibold"
+                                      style={{ background: "var(--admin-success)", color: "#fff" }}
+                                      type="button"
+                                      onClick={() => reviewComplaint(complaint._id, true)}
+                                    >
+                                      Resolve
+                                    </button>
+                                    <button
+                                      className="rounded-xl px-3 py-2 text-xs font-semibold"
+                                      style={{ background: "var(--admin-danger)", color: "#fff" }}
+                                      type="button"
+                                      onClick={() => reviewComplaint(complaint._id, false)}
+                                    >
+                                      Reject
+                                    </button>
+                                  </div>
+                                </div>
+                              ) : (
+                                <span className="text-xs admin-subtle">Reviewed</span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                      {!dashboard.complaints?.length ? (
+                        <tr>
+                          <td colSpan="8" className="px-4 py-6 text-sm admin-subtle">No complaints available.</td>
+                        </tr>
+                      ) : null}
+                    </tbody>
+                  </table>
+                </div>
+              </AdminSection>
+
+              <AdminSection title="Appeal Review" subtitle="Review rider claim appeals and decide whether the claim should proceed.">
+                <div className="overflow-hidden rounded-2xl border" style={{ borderColor: "var(--admin-border)" }}>
+                  <table className="w-full text-left text-sm">
+                    <thead style={{ background: "var(--admin-surface-soft)" }}>
+                      <tr>
+                        <th className="px-4 py-3">Claim</th>
+                        <th className="px-4 py-3">Event</th>
+                        <th className="px-4 py-3">Status</th>
+                        <th className="px-4 py-3">Created</th>
+                        <th className="px-4 py-3">Reason</th>
+                        <th className="px-4 py-3">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(dashboard.appeals || []).map((appeal) => {
+                        const canReview = ["OPEN", "UNDER_REVIEW"].includes(appeal.status);
+                        const eventLabel = appeal.claimId?.eventId?.eventType?.replaceAll("_", " ") || "-";
+
+                        return (
+                          <tr key={appeal._id} className="border-t align-top" style={{ borderColor: "var(--admin-border)" }}>
+                            <td className="px-4 py-3">{appeal.claimId?._id || "-"}</td>
+                            <td className="px-4 py-3">{eventLabel}</td>
+                            <td className="px-4 py-3">
+                              <Tag
+                                color={
+                                  appeal.status === "RESOLVED"
+                                    ? "var(--admin-success)"
+                                    : appeal.status === "REJECTED"
+                                      ? "var(--admin-danger)"
+                                      : "var(--admin-accent)"
+                                }
+                                soft={
+                                  appeal.status === "RESOLVED"
+                                    ? "rgba(22,163,74,0.12)"
+                                    : appeal.status === "REJECTED"
+                                      ? "rgba(220,38,38,0.12)"
+                                      : "rgba(37,99,235,0.12)"
+                                }
+                              >
+                                {appeal.status}
+                              </Tag>
+                            </td>
+                            <td className="px-4 py-3">{formatDate(appeal.createdAt)}</td>
+                            <td className="px-4 py-3">{appeal.reason}</td>
+                            <td className="px-4 py-3">
+                              {canReview ? (
+                                <div className="flex gap-2">
+                                  <button
+                                    className="rounded-xl px-3 py-2 text-xs font-semibold"
+                                    style={{ background: "var(--admin-success)", color: "#fff" }}
+                                    type="button"
+                                    onClick={() => reviewAppeal(appeal._id, true)}
+                                  >
+                                    Approve
+                                  </button>
+                                  <button
+                                    className="rounded-xl px-3 py-2 text-xs font-semibold"
+                                    style={{ background: "var(--admin-danger)", color: "#fff" }}
+                                    type="button"
+                                    onClick={() => reviewAppeal(appeal._id, false)}
+                                  >
+                                    Reject
+                                  </button>
+                                </div>
+                              ) : (
+                                <span className="text-xs admin-subtle">Reviewed</span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                      {!dashboard.appeals?.length ? (
+                        <tr>
+                          <td colSpan="6" className="px-4 py-6 text-sm admin-subtle">No appeals available.</td>
+                        </tr>
+                      ) : null}
+                    </tbody>
+                  </table>
+                </div>
               </AdminSection>
             </div>
           ) : null}

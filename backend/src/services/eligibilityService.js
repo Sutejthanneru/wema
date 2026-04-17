@@ -131,6 +131,21 @@ export async function evaluateRiderForEvent(rider, event) {
 
   await claim.save();
 
+  // Auto-trigger payout for approved weather claims with LOW fraud
+  if (claim.decision === CLAIM_STATUS.APPROVED && event.sourceType === "WEATHER") {
+    try {
+      const { releasePayoutForClaim } = await import("./paymentService.js");
+      // Schedule payout in 5 seconds to avoid race conditions
+      setTimeout(() => {
+        releasePayoutForClaim(claim._id)
+          .then(() => console.log(`[Auto-Payout] Released payout for claim ${claim._id}`))
+          .catch((error) => console.error(`[Auto-Payout] Failed for claim ${claim._id}:`, error.message));
+      }, 5000);
+    } catch (error) {
+      console.error("[Auto-Payout] Error setting up automatic payout:", error.message);
+    }
+  }
+
   await logFraudAssessment({
     riderId: rider._id,
     eventId: event._id,
@@ -143,6 +158,9 @@ export async function evaluateRiderForEvent(rider, event) {
     },
     clusterContext,
     score: fraud.score,
+    scoringEngine: fraud.scoringEngine,
+    scoringModel: fraud.scoringModel,
+    scoringMode: fraud.scoringMode,
     riskTier: fraud.riskTier,
     explanation: fraud.explanations
   });

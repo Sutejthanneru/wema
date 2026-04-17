@@ -33,30 +33,28 @@ export function AppShell({ children }) {
 
   return (
     <div className="min-h-screen px-4 py-6 text-slate-100 md:px-8">
-      <header className="mb-6 flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+      <header className="glass-strong mb-6 flex flex-col gap-4 rounded-[1rem] px-5 py-5 md:flex-row md:items-center md:justify-between">
         <div>
-          <p className="text-sm uppercase tracking-[0.35em] text-aqua">WEMA</p>
-          <h1 className="text-3xl font-bold">Weather Event Money Assurance</h1>
-          <p className="mt-2 max-w-3xl text-sm text-slate-300">
-            Automated income protection for riders when verified calamities block work.
-          </p>
+          <p className="ui-brand text-sm font-semibold uppercase text-blue-400">WEMA</p>
+          <h1 className="ui-title text-3xl font-bold">Weather Event Money Assurance</h1>
+          <p className="ui-subtext mt-2 max-w-3xl text-sm">Income protection for food delivery riders.</p>
         </div>
 
-        <div className="glass flex items-center gap-3 rounded-full px-4 py-3">
+        <div className="ui-card-block flex items-center gap-3 rounded-full px-4 py-3">
           {session?.user ? (
             <>
-              <span className="text-sm text-slate-300">
+              <span className="ui-subtext text-sm">
                 {session.user.name} · {session.user.role}
               </span>
               <button
-                className="rounded-full bg-aqua px-4 py-2 text-sm font-semibold text-slate-950"
+                className="ui-primary-button rounded-full px-4 py-2 text-sm font-semibold"
                 onClick={logout}
               >
                 Logout
               </button>
             </>
           ) : (
-            <span className="text-sm text-slate-300">Authentication required</span>
+            <span className="ui-subtext text-sm">Sign in to continue</span>
           )}
         </div>
       </header>

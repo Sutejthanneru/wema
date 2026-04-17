@@ -23,6 +23,11 @@ const riderProfileSchema = new mongoose.Schema(
   {
     userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, unique: true },
     provider: { type: String, enum: ["ZOMATO", "SWIGGY"], required: true },
+    partnerId: { type: String, unique: true, sparse: true, trim: true, uppercase: true },
+    aadhaarLast4: {
+      type: String,
+      match: [/^\d{4}$/, "Aadhaar last 4 must be exactly 4 digits"]
+    },
     city: { type: String, required: true },
     zoneCode: {
       type: String,

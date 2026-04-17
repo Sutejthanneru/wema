@@ -3,6 +3,7 @@ import mongoose from "mongoose";
 const complaintSchema = new mongoose.Schema(
   {
     riderId: { type: mongoose.Schema.Types.ObjectId, ref: "RiderProfile", required: true },
+    relatedClaimId: { type: mongoose.Schema.Types.ObjectId, ref: "Claim" },
     category: {
       type: String,
       enum: ["PAYMENT_DELAY", "WRONG_CALCULATION", "TECHNICAL_ISSUE", "OTHER"],
@@ -15,7 +16,9 @@ const complaintSchema = new mongoose.Schema(
       enum: ["OPEN", "UNDER_REVIEW", "RESOLVED", "REJECTED"],
       default: "OPEN"
     },
-    resolutionNote: { type: String, trim: true }
+    resolutionNote: { type: String, trim: true },
+    adjustmentAmount: { type: Number, default: 0 },
+    adjustmentPayoutId: { type: mongoose.Schema.Types.ObjectId, ref: "Payout" }
   },
   { timestamps: true }
 );

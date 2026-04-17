@@ -1,9 +1,9 @@
 export function Panel({ title, subtitle, children, className = "" }) {
   return (
-    <section className={`glass rounded-3xl p-6 shadow-panel ${className}`}>
-      <div className="mb-4">
-        <h2 className="text-lg font-semibold text-white">{title}</h2>
-        {subtitle ? <p className="mt-1 text-sm text-slate-300">{subtitle}</p> : null}
+    <section className={`glass-strong rounded-[1.75rem] p-6 shadow-panel ${className}`}>
+      <div className="mb-5">
+        <h2 className="ui-title text-xl font-semibold">{title}</h2>
+        {subtitle ? <p className="ui-subtext mt-1 text-sm">{subtitle}</p> : null}
       </div>
       {children}
     </section>

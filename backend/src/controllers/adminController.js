@@ -50,7 +50,7 @@ export const reviewAppealDecision = asyncHandler(async (req, res) => {
 });
 
 export const reviewComplaintDecision = asyncHandler(async (req, res) => {
-  const result = await reviewComplaint(req.params.complaintId, req.body.approved, req.body.note);
+  const result = await reviewComplaint(req.params.complaintId, req.body.approved, req.body.note, req.body.adjustmentAmount);
   res.json({ success: true, data: result });
 });
 

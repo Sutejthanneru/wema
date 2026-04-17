@@ -5,6 +5,7 @@ export const PLAN_CONFIG = {
     weeklyPayoutCap: 300,
     daysCoveredPerWeek: 2,
     payoutTargetMinutes: 120,
+    lockInMonths: 2,
     calamityTypes: ["BANDH", "CURFEW", "STRIKE", "ZONE_CLOSURE", "SOCIAL_DISRUPTION"]
   },
   STANDARD: {
@@ -13,6 +14,7 @@ export const PLAN_CONFIG = {
     weeklyPayoutCap: 600,
     daysCoveredPerWeek: 2,
     payoutTargetMinutes: 120,
+    lockInMonths: 6,
     calamityTypes: ["HEAVY_RAIN", "FLOOD", "EXTREME_HEAT", "SEVERE_POLLUTION"]
   },
   PRO: {
@@ -21,6 +23,7 @@ export const PLAN_CONFIG = {
     weeklyPayoutCap: 1200,
     daysCoveredPerWeek: 3,
     payoutTargetMinutes: 60,
+    lockInMonths: 9,
     calamityTypes: [
       "HEAVY_RAIN",
       "FLOOD",
@@ -39,6 +42,7 @@ export const PLAN_CONFIG = {
     weeklyPayoutCap: 2000,
     daysCoveredPerWeek: 5,
     payoutTargetMinutes: 30,
+    lockInMonths: 12,
     calamityTypes: [
       "HEAVY_RAIN",
       "FLOOD",

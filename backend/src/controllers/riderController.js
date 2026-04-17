@@ -6,6 +6,7 @@ import {
   getPlans,
   getPayoutHistory,
   getRiderDashboard,
+  getRiderPremiumQuote,
   subscribePolicy,
   syncProviderSnapshot,
   updateRiderLocation,
@@ -41,6 +42,11 @@ export const payouts = asyncHandler(async (req, res) => {
 
 export const plans = asyncHandler(async (_req, res) => {
   const result = await getPlans();
+  res.json({ success: true, data: result });
+});
+
+export const premiumQuote = asyncHandler(async (req, res) => {
+  const result = await getRiderPremiumQuote(req.auth.userId, req.body);
   res.json({ success: true, data: result });
 });
 

@@ -1,7 +1,7 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 import { AppShell } from "./components/layout/AppShell.jsx";
 import RiderDashboard from "./pages/rider/RiderDashboard.jsx";
-import AdminDashboard from "./pages/admin/AdminDashboard.jsx";
+import AdminDashboard from "./pages/admin/AdminDashboardV2.jsx";
 import { useAuth } from "./context/AuthContext.jsx";
 import AuthPage from "./pages/AuthPage.jsx";
 

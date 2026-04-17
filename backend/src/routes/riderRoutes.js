@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { appeal, alerts, complaint, dashboard, payouts, plans, providerSync, selectPlan, subscribe, updateLocation, updateProfile, syncPinGps } from "../controllers/riderController.js";
+import { appeal, alerts, complaint, dashboard, payouts, plans, premiumQuote, providerSync, selectPlan, subscribe, updateLocation, updateProfile, syncPinGps } from "../controllers/riderController.js";
 import { verifyToken } from "../middleware/verifyToken.js";
 import { requireRole } from "../middleware/requireRole.js";
 import { ROLES } from "../constants/roles.js";
@@ -9,6 +9,7 @@ const router = Router();
 router.use(verifyToken, requireRole(ROLES.RIDER));
 router.get("/dashboard", dashboard);
 router.get("/plans", plans);
+router.post("/premium", premiumQuote);
 router.post("/subscribe", subscribe);
 router.post("/plan", selectPlan);
 router.post("/provider-sync", providerSync);

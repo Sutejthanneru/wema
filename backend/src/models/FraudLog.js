@@ -13,6 +13,13 @@ const fraudLogSchema = new mongoose.Schema(
       suspiciousZoneBurst: { type: Boolean, default: false }
     },
     score: { type: Number, default: 0 },
+    scoringEngine: { type: String, default: "unknown" },
+    scoringModel: { type: String, default: "unknown" },
+    scoringMode: {
+      type: String,
+      enum: ["ML_SERVICE", "RULE_FALLBACK", "unknown"],
+      default: "unknown"
+    },
     riskTier: {
       type: String,
       enum: Object.values(RISK_TIERS),

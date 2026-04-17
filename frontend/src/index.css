@@ -1,14 +1,25 @@
+@import url("https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@600;700;800&display=swap");
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 :root {
   color: #e2e8f0;
-  background:
-    radial-gradient(circle at top left, rgba(98, 214, 255, 0.18), transparent 30%),
-    radial-gradient(circle at bottom right, rgba(249, 115, 22, 0.16), transparent 28%),
-    linear-gradient(135deg, #020617 0%, #0f172a 55%, #172554 100%);
+  background: #020617;
   font-family: "Segoe UI", "Trebuchet MS", sans-serif;
+  --ui-title: #e2e8f0;
+  --ui-subtext: #94a3b8;
+  --ui-important: #ffffff;
+  --ui-card: #0b1120;
+  --ui-card-strong: #0b1120;
+  --ui-border: #1e293b;
+  --ui-border-strong: #1e293b;
+  --ui-primary: linear-gradient(135deg, #2563eb, #3b82f6);
+  --ui-success: #22c55e;
+  --ui-warning: #facc15;
+  --ui-danger: #ef4444;
+  --ui-muted: #64748b;
 }
 
 body[data-admin-theme="dark"] {
@@ -31,9 +42,106 @@ body {
 }
 
 .glass {
-  background: rgba(15, 23, 42, 0.72);
-  backdrop-filter: blur(16px);
-  border: 1px solid rgba(148, 163, 184, 0.18);
+  background: var(--ui-card);
+  border: 1px solid var(--ui-border);
+  box-shadow: 0 16px 34px rgba(2, 6, 23, 0.22);
+}
+
+.glass-strong {
+  background: var(--ui-card-strong);
+  border: 1px solid var(--ui-border-strong);
+  box-shadow: 0 18px 40px rgba(2, 6, 23, 0.24);
+}
+
+.ui-title {
+  color: var(--ui-title);
+}
+
+.ui-subtext {
+  color: var(--ui-subtext);
+}
+
+.ui-important {
+  color: var(--ui-important);
+}
+
+.ui-brand {
+  font-family: "Plus Jakarta Sans", "Segoe UI", sans-serif;
+  letter-spacing: 0.08em;
+}
+
+.ui-primary-button {
+  background: var(--ui-primary);
+  color: #ffffff;
+  box-shadow: 0 12px 24px rgba(37, 99, 235, 0.22);
+  transition:
+    transform 160ms ease,
+    box-shadow 160ms ease,
+    filter 160ms ease,
+    opacity 160ms ease;
+}
+
+.ui-primary-button:hover:not(:disabled) {
+  transform: scale(1.02);
+  box-shadow: 0 18px 32px rgba(37, 99, 235, 0.28);
+  filter: brightness(1.04);
+}
+
+.ui-secondary-button {
+  background: #0b1120;
+  color: var(--ui-important);
+  border: 1px solid var(--ui-border);
+  transition:
+    transform 160ms ease,
+    border-color 160ms ease,
+    background 160ms ease,
+    opacity 160ms ease;
+}
+
+.ui-secondary-button:hover:not(:disabled) {
+  transform: scale(1.02);
+  background: #111b31;
+  border-color: #334155;
+}
+
+.ui-input {
+  background: #0b1120;
+  border: 1px solid #1e293b;
+  color: var(--ui-important);
+  transition: border-color 160ms ease, box-shadow 160ms ease, background 160ms ease;
+}
+
+.ui-input::placeholder {
+  color: var(--ui-subtext);
+}
+
+.ui-input:focus {
+  border-color: rgba(59, 130, 246, 0.8);
+  box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.12);
+  background: #0f172a;
+}
+
+.ui-stat {
+  background: #0b1120;
+  border: 1px solid #1e293b;
+}
+
+.ui-card-block {
+  background: #0b1120;
+  border: 1px solid #1e293b;
+  border-radius: 12px;
+}
+
+.ui-status-active {
+  color: var(--ui-success);
+}
+
+.ui-status-pending {
+  color: var(--ui-warning);
+}
+
+.ui-status-error {
+  color: var(--ui-danger);
 }
 
 .admin-app {

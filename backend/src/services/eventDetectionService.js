@@ -7,9 +7,10 @@ import { releasePayoutForClaim } from "./payoutService.js";
 import { env } from "../config/env.js";
 import { haversineDistanceKm } from "../utils/geo.js";
 import { normalizeCity } from "../utils/geography.js";
+import { fetchFraudServiceSummary } from "./fraudService.js";
 
 const openWeatherClient = axios.create({
-  timeout: 6000
+  timeout: 10000
 });
 
 function buildSeverity(eventType, snapshot) {
@@ -48,23 +49,27 @@ async function recentMatchingEventExists({ zoneCode, city, eventType }) {
 }
 
 async function fetchZoneWeatherSnapshot(zone) {
-  const [weatherResponse, airResponse] = await Promise.all([
-    openWeatherClient.get("https://api.openweathermap.org/data/2.5/weather", {
+  const weatherResponse = await openWeatherClient.get("https://api.openweathermap.org/data/2.5/weather", {
+    params: {
+      lat: zone.center.lat,
+      lon: zone.center.lng,
+      units: "metric",
+      appid: env.openWeatherApiKey
+    }
+  });
+
+  let airResponse = { data: {} };
+  try {
+    airResponse = await openWeatherClient.get("https://api.openweathermap.org/data/2.5/air_pollution", {
       params: {
         lat: zone.center.lat,
         lon: zone.center.lng,
-        units: "metric",
         appid: env.openWeatherApiKey
       }
-    }),
-    openWeatherClient.get("https://api.openweathermap.org/data/2.5/air_pollution", {
-      params: {
-        lat: zone.center.lat,
-        lon: zone.center.lng,
-        appid: env.openWeatherApiKey
-      }
-    })
-  ]);
+    });
+  } catch (_error) {
+    airResponse = { data: {} };
+  }
 
   let oneCallResponse = { data: {} };
   try {
@@ -394,11 +399,13 @@ export function startAutomaticWeatherMonitor() {
 }
 
 export async function fetchExternalSignalsSummary() {
+  const fraudSummary = await fetchFraudServiceSummary();
   const summary = {
     weatherProvider: "OpenWeather",
     socialEventMode: "MANUAL_ADMIN_REVIEW",
     configured: Boolean(env.openWeatherApiKey),
-    automaticWeatherSync: Boolean(env.openWeatherApiKey)
+    automaticWeatherSync: Boolean(env.openWeatherApiKey),
+    fraudModel: fraudSummary
   };
 
   if (!summary.configured) {
@@ -408,11 +415,20 @@ export async function fetchExternalSignalsSummary() {
   try {
     await axios.get("https://api.openweathermap.org/data/2.5/weather", {
       params: { q: "Hyderabad,IN", appid: env.openWeatherApiKey },
-      timeout: 3000
+      timeout: 8000
     });
     summary.weatherReachable = true;
   } catch (_error) {
     summary.weatherReachable = false;
+  }
+
+  try {
+    await axios.get("https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_day.geojson", {
+      timeout: 8000
+    });
+    summary.earthquakeFeedReachable = true;
+  } catch (_error) {
+    summary.earthquakeFeedReachable = false;
   }
 
   return summary;

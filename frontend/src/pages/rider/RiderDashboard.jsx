@@ -1,8 +1,15 @@
-import { useEffect, useState } from "react";
-import { Panel } from "../../components/ui/Panel.jsx";
+import { useEffect, useMemo, useState } from "react";
 import api from "../../api/client.js";
+import { useAuth } from "../../context/AuthContext.jsx";
+import { RiderHomeTab } from "./RiderHomeTab.jsx";
+import { RiderPolicyTab } from "./RiderPolicyTab.jsx";
+import { RiderClaimsTab } from "./RiderClaimsTab.jsx";
+import { RiderPayoutsTab } from "./RiderPayoutsTab.jsx";
+import { RiderProfileTabV2 } from "./RiderProfileTabV2.jsx";
+import { PLAN_LOCK_MONTHS, PLAN_ORDER, readIdentityMeta, TAB_ITEMS } from "./RiderTabShared.jsx";
 
 export default function RiderDashboard() {
+  const { logout } = useAuth();
   const [dashboard, setDashboard] = useState(null);
   const [payouts, setPayouts] = useState([]);
   const [plans, setPlans] = useState([]);
@@ -14,6 +21,7 @@ export default function RiderDashboard() {
   const [appealMessage, setAppealMessage] = useState("");
   const [complaintForm, setComplaintForm] = useState({
     category: "PAYMENT_DELAY",
+    relatedClaimId: "",
     subject: "",
     message: ""
   });
@@ -37,6 +45,8 @@ export default function RiderDashboard() {
   const [pinLocationLoading, setPinLocationLoading] = useState(false);
   const [watchingLocation, setWatchingLocation] = useState(false);
   const [watchId, setWatchId] = useState(null);
+  const [activeTab, setActiveTab] = useState("home");
+  const [identityMeta, setIdentityMeta] = useState({ platform: "", partnerId: "", aadhaarLast4: "" });
 
   const loadRiderData = async () => {
     setLoading(true);
@@ -49,11 +59,18 @@ export default function RiderDashboard() {
         api.get("/rider/plans")
       ]);
 
-      setDashboard(dashboardResponse.data);
-      setPayouts(payoutsResponse.data);
-      setPlans(plansResponse.data);
-      if (dashboardResponse.data?.rider) {
-        const rider = dashboardResponse.data.rider;
+      const payload = dashboardResponse?.data || {};
+      console.groupCollapsed("[RiderDashboard] backend payload");
+      console.log("Fresh Dashboard Data:", payload);
+      console.log("Active Policy Field:", payload.activePolicy);
+      console.log("Rider Plan Field:", payload.rider?.plan);
+      console.groupEnd();
+
+      setDashboard(payload);
+      setPayouts(Array.isArray(payoutsResponse?.data?.data) ? payoutsResponse.data.data : []);
+      setPlans(Array.isArray(plansResponse?.data?.data) ? plansResponse.data.data : []);
+      if (payload?.rider) {
+        const rider = payload.rider;
         setProfileForm({
           name: rider.userId?.name || rider.name || "",
           phone: rider.userId?.phone || rider.phone || "",
@@ -63,6 +80,7 @@ export default function RiderDashboard() {
           provider: rider.provider || "",
           weeklyEarningsAverage: rider.weeklyEarningsAverage ?? ""
         });
+        setIdentityMeta(readIdentityMeta(rider));
       }
     } catch (requestError) {
       setError(requestError?.response?.data?.message || "Unable to load rider dashboard.");
@@ -80,14 +98,28 @@ export default function RiderDashboard() {
     setError("");
 
     try {
-      const { data } = await api.post("/rider/plan", { plan });
-      setDashboard((current) => ({
-        ...current,
-        rider: data.data.rider,
-        premium: data.data.premium
-      }));
+      // Call /rider/subscribe to ACTIVATE the policy with lock-in period
+      const { data } = await api.post("/rider/subscribe", {
+        plan,
+        autoRenew: false
+      });
+      const subscription = data?.data;
+      if (subscription?.policy) {
+        setDashboard((current) => ({
+          ...(current || {}),
+          rider: subscription.rider || current?.rider,
+          premium: subscription.premium || current?.premium,
+          aiPremiumInsight: subscription.aiPremiumInsight || current?.aiPremiumInsight,
+          activePolicy: subscription.policy,
+          premiumPayments: subscription.premiumPayment
+            ? [subscription.premiumPayment, ...(current?.premiumPayments || [])]
+            : current?.premiumPayments || []
+        }));
+      }
+      // Reload dashboard to show activated policy
+      await loadRiderData();
     } catch (requestError) {
-      setError(requestError?.response?.data?.message || "Unable to update plan.");
+      setError(requestError?.response?.data?.message || "Unable to activate plan.");
     } finally {
       setSavingPlan("");
     }
@@ -100,10 +132,23 @@ export default function RiderDashboard() {
     setComplaintMessage("");
 
     try {
-      await api.post("/rider/subscribe", {
+      const { data } = await api.post("/rider/subscribe", {
         plan: currentPlan,
         autoRenew: false
       });
+      const subscription = data?.data;
+      if (subscription?.policy) {
+        setDashboard((current) => ({
+          ...(current || {}),
+          rider: subscription.rider || current?.rider,
+          premium: subscription.premium || current?.premium,
+          aiPremiumInsight: subscription.aiPremiumInsight || current?.aiPremiumInsight,
+          activePolicy: subscription.policy,
+          premiumPayments: subscription.premiumPayment
+            ? [subscription.premiumPayment, ...(current?.premiumPayments || [])]
+            : current?.premiumPayments || []
+        }));
+      }
       await loadRiderData();
     } catch (requestError) {
       setError(requestError?.response?.data?.message || "Unable to activate policy.");
@@ -139,9 +184,19 @@ export default function RiderDashboard() {
       });
       const updatedRider = data?.data?.rider;
       if (updatedRider) {
+        const premiumQuoteResponse = await api.post("/rider/premium", {
+          plan: updatedRider.plan,
+          city: updatedRider.city,
+          zoneCode: updatedRider.zoneCode,
+          weeklyEarningsAverage: updatedRider.weeklyEarningsAverage
+        });
+        const premiumQuote = premiumQuoteResponse?.data?.data;
+
         setDashboard((current) => ({
           ...current,
-          rider: updatedRider
+          rider: updatedRider,
+          premium: premiumQuote?.premium || current?.premium,
+          aiPremiumInsight: premiumQuote?.aiPremiumInsight || current?.aiPremiumInsight
         }));
         setProfileForm({
           name: updatedRider.userId?.name || updatedRider.name || "",
@@ -188,6 +243,7 @@ export default function RiderDashboard() {
       setComplaintMessage("Complaint submitted successfully.");
       setComplaintForm({
         category: "PAYMENT_DELAY",
+        relatedClaimId: "",
         subject: "",
         message: ""
       });
@@ -295,6 +351,55 @@ export default function RiderDashboard() {
     }
   };
 
+  const handleShiftToggle = async () => {
+    const nextStatus = isShiftActive ? "IDLE" : "ACTIVE";
+    setProviderSyncForm({ deliveryStatus: nextStatus });
+    setError("");
+    setLocationMessage("");
+
+    if (!/^\d{6}$/.test(String(profileForm.zoneCode || "").trim())) {
+      setActiveTab("profile");
+      setError("Please update your zone code in Profile using a valid 6-digit PIN before starting your shift.");
+      return;
+    }
+
+    try {
+      if (!isShiftActive && navigator.geolocation) {
+        await new Promise((resolve) => {
+          navigator.geolocation.getCurrentPosition(
+            async (position) => {
+              try {
+                await pushCurrentLocation(position);
+              } catch {
+                // Keep shift updates working even if location refresh fails.
+              } finally {
+                resolve();
+              }
+            },
+            () => resolve(),
+            { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 }
+          );
+        });
+      }
+
+      await api.post("/rider/provider-sync", { deliveryStatus: nextStatus });
+
+      if (!isShiftActive && !watchingLocation) {
+        toggleLiveLocation();
+      }
+      if (isShiftActive && watchingLocation && watchId !== null && navigator.geolocation) {
+        navigator.geolocation.clearWatch(watchId);
+        setWatchingLocation(false);
+        setWatchId(null);
+      }
+
+      setLocationMessage(nextStatus === "ACTIVE" ? "Your shift is active now." : "Your shift has ended.");
+      await loadRiderData();
+    } catch (requestError) {
+      setError(requestError?.response?.data?.message || "Unable to update shift status.");
+    }
+  };
+
   useEffect(() => {
     return () => {
       if (watchId !== null && navigator.geolocation) {
@@ -302,22 +407,6 @@ export default function RiderDashboard() {
       }
     };
   }, [watchId]);
-
-  if (loading) {
-    return (
-      <div className="glass rounded-[2rem] p-10 text-center text-slate-300 shadow-panel">
-        Loading rider dashboard...
-      </div>
-    );
-  }
-
-  if (error && !dashboard) {
-    return (
-      <div className="glass rounded-[2rem] p-10 text-center text-rose-300 shadow-panel">
-        {error}
-      </div>
-    );
-  }
 
   const currentPlan = dashboard?.rider?.plan;
   const claims = dashboard?.recentClaims || [];
@@ -329,376 +418,154 @@ export default function RiderDashboard() {
     ["REJECTED", "HOLD_RIDER_VERIFICATION"].includes(claim.decision)
   );
   const activePolicy = dashboard?.activePolicy;
+  const activePlanKey = activePolicy?.planKey || null;
   const premiumPayments = dashboard?.premiumPayments || [];
+  const aiPremiumInsight = dashboard?.aiPremiumInsight || null;
   const activeDeliveryStatus = dashboard?.rider?.activeDelivery?.status || "IDLE";
-  const currentGps = dashboard?.rider?.currentGps;
+  const isShiftActive = ["ACTIVE", "PICKED_UP"].includes(activeDeliveryStatus);
+  const coveredToday = eligibilityStatus.coveredToday ? "YES" : "NO";
+  const zoneLabel = dashboard?.rider?.zoneCode || "Not set";
+  const matchingAlert = activeAlerts[0];
+  const coverageExplanation = eligibilityStatus.coveredToday && matchingAlert
+    ? `You are covered due to ${matchingAlert.eventType.replaceAll("_", " ").toLowerCase()} in your area.`
+    : "No verified weather or disruption alert is affecting your area right now.";
+  const currentPlanIndex = PLAN_ORDER.indexOf(currentPlan);
+  const policyCards = useMemo(
+    () =>
+      plans.map((plan) => {
+        const lockMonths = PLAN_LOCK_MONTHS[plan.key] || 0;
+        const isCurrent = plan.key === activePlanKey;
+        const planIndex = PLAN_ORDER.indexOf(plan.key);
+        const isDowngrade = planIndex < currentPlanIndex;
+        const startedAt = activePolicy?.coverageStart ? new Date(activePolicy.coverageStart) : new Date();
+        const monthsElapsed = Math.max(
+          0,
+          (new Date().getFullYear() - startedAt.getFullYear()) * 12 + (new Date().getMonth() - startedAt.getMonth())
+        );
+
+        return {
+          ...plan,
+          isCurrent,
+          remainingMonths: Math.max(1, lockMonths - monthsElapsed),
+          locked: !isCurrent && isDowngrade,
+          accent:
+            plan.key === "BASIC"
+              ? "#64748B"
+              : plan.key === "STANDARD"
+                ? "#2563EB"
+                : plan.key === "PRO"
+                  ? "#3B82F6"
+                  : "#22C55E"
+        };
+      }),
+    [plans, activePlanKey, currentPlanIndex, activePolicy?.coverageStart]
+  );
+
+  if (loading) {
+    return (
+      <div className="glass-strong ui-subtext rounded-[2rem] p-10 text-center shadow-panel">
+        Loading rider dashboard...
+      </div>
+    );
+  }
+
+  if (error && !dashboard) {
+    return (
+      <div className="glass-strong ui-status-error rounded-[2rem] p-10 text-center shadow-panel">
+        {error}
+      </div>
+    );
+  }
 
   return (
-    <div className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
-      <div className="space-y-6">
-        <Panel title="Protected This Week" subtitle="Premium stays capped at 2% of expected weekly earnings.">
-          <div className="grid gap-4 md:grid-cols-3">
-            <div className="rounded-2xl bg-slate-900/60 p-4">
-              <p className="text-sm text-slate-400">Current Plan</p>
-              <p className="mt-2 text-2xl font-semibold">{currentPlan}</p>
-            </div>
-            <div className="rounded-2xl bg-slate-900/60 p-4">
-              <p className="text-sm text-slate-400">This Week's Premium</p>
-              <p className="mt-2 text-2xl font-semibold">Rs {dashboard?.premium?.recommendedPremium ?? 0}</p>
-            </div>
-            <div className="rounded-2xl bg-slate-900/60 p-4">
-              <p className="text-sm text-slate-400">Weekly Income Avg</p>
-              <p className="mt-2 text-2xl font-semibold">Rs {dashboard?.rider?.weeklyEarningsAverage ?? 0}</p>
-            </div>
-          </div>
-          <div className="mt-4 flex items-center justify-between rounded-2xl bg-slate-950/40 p-4">
-            <div>
-              <p className="text-sm text-slate-400">Policy status</p>
-              <p className="mt-1 font-semibold text-white">{activePolicy ? activePolicy.status : "INACTIVE"}</p>
-            </div>
+    <div className="space-y-6">
+      <div className="glass-strong rounded-[1rem] p-3 shadow-panel">
+        <div className="flex flex-wrap gap-2">
+          {TAB_ITEMS.map((tab) => (
             <button
-              className="rounded-2xl bg-aqua px-4 py-3 font-semibold text-slate-950 disabled:opacity-60"
+              key={tab.key}
               type="button"
-              onClick={handleSubscribe}
-              disabled={subscribing}
+              onClick={() => setActiveTab(tab.key)}
+              className={`rounded-xl px-4 py-3 text-sm font-semibold transition ${activeTab === tab.key ? "ui-primary-button" : "ui-secondary-button"}`}
             >
-              {subscribing ? "Activating..." : activePolicy ? "Renew policy" : "Activate policy"}
+              {tab.label}
             </button>
-          </div>
-        </Panel>
-
-        <Panel title="Coverage Status" subtitle="Coverage is system-driven and based on the rider's active plan and event match.">
-          <div className="grid gap-4 md:grid-cols-4">
-            <div className="rounded-2xl bg-slate-900/60 p-4">
-              <p className="text-sm text-slate-400">Covered Today</p>
-              <p className="mt-2 text-xl font-semibold">{eligibilityStatus.coveredToday ? "Yes" : "No"}</p>
-            </div>
-            <div className="rounded-2xl bg-slate-900/60 p-4">
-              <p className="text-sm text-slate-400">Latest Claim</p>
-              <p className="mt-2 text-xl font-semibold">{eligibilityStatus.latestClaimDecision || "NO_EVENT"}</p>
-            </div>
-            <div className="rounded-2xl bg-slate-900/60 p-4">
-              <p className="text-sm text-slate-400">Open Appeals</p>
-              <p className="mt-2 text-xl font-semibold">{eligibilityStatus.openAppeals ?? 0}</p>
-            </div>
-            <div className="rounded-2xl bg-slate-900/60 p-4">
-              <p className="text-sm text-slate-400">Open Complaints</p>
-              <p className="mt-2 text-xl font-semibold">{eligibilityStatus.openComplaints ?? 0}</p>
-            </div>
-          </div>
-          <div className="mt-4 rounded-2xl bg-slate-950/40 p-4">
-            <p className="text-sm text-slate-400">Current GPS</p>
-            <p className="mt-1 font-semibold text-white">
-              {currentGps ? `${currentGps.lat.toFixed(5)}, ${currentGps.lng.toFixed(5)}` : "No GPS stored"}
-            </p>
-            <div className="mt-3 flex flex-col gap-3 md:flex-row">
-              <button
-                className="rounded-2xl bg-aqua px-4 py-3 font-semibold text-slate-950 disabled:opacity-60"
-                type="button"
-                onClick={handleUseMyLocation}
-                disabled={locationLoading}
-              >
-                {locationLoading ? "Fetching GPS..." : "Use my location"}
-              </button>
-              <button
-                className="rounded-2xl bg-slate-800 px-4 py-3 font-semibold text-white disabled:opacity-60"
-                type="button"
-                onClick={handleUsePinLocation}
-                disabled={pinLocationLoading}
-              >
-                {pinLocationLoading ? "Setting PIN GPS..." : "Use PIN location"}
-              </button>
-              <button
-                className="rounded-2xl bg-slate-800 px-4 py-3 font-semibold text-white"
-                type="button"
-                onClick={toggleLiveLocation}
-              >
-                {watchingLocation ? "Stop live GPS" : "Start live GPS"}
-              </button>
-            </div>
-            {locationMessage ? <p className="mt-3 text-sm text-emerald-300">{locationMessage}</p> : null}
-          </div>
-        </Panel>
-
-        <Panel title="Provider Sync" subtitle="Demo-mode provider snapshot for active delivery verification.">
-          <form className="flex flex-col gap-3 md:flex-row" onSubmit={handleProviderSync}>
-            <select
-              className="rounded-2xl border border-slate-800 bg-slate-950/50 px-4 py-3 text-white outline-none"
-              value={providerSyncForm.deliveryStatus}
-              onChange={(event) => setProviderSyncForm({ deliveryStatus: event.target.value })}
-            >
-              <option value="IDLE">IDLE</option>
-              <option value="ACTIVE">ACTIVE</option>
-              <option value="PICKED_UP">PICKED_UP</option>
-            </select>
-            <button className="rounded-2xl bg-aqua px-4 py-3 font-semibold text-slate-950" type="submit">
-              Sync provider status
-            </button>
-          </form>
-          <p className="mt-3 text-sm text-slate-400">Current synced delivery status: {activeDeliveryStatus}</p>
-        </Panel>
-
-        <Panel title="Live Alerts" subtitle="Alerts are system-detected. Riders do not submit claims manually.">
-          <div className="space-y-3">
-            {activeAlerts.length ? activeAlerts.map((alert) => (
-              <div key={alert._id} className="rounded-2xl border border-slate-700 bg-slate-900/50 p-4">
-                <div className="flex items-center justify-between">
-                  <p className="font-semibold">{alert.eventType.replaceAll("_", " ")}</p>
-                  <span className="rounded-full bg-amber-400/20 px-3 py-1 text-xs text-amber-300">
-                    {alert.severity.label}
-                  </span>
-                </div>
-                <p className="mt-2 text-sm text-slate-300">{alert.city}</p>
-              </div>
-            )) : <div className="rounded-2xl bg-slate-900/50 p-4 text-sm text-slate-400">No verified alerts for this rider right now.</div>}
-          </div>
-        </Panel>
-
-        <Panel title="Claims & Payouts" subtitle="Strict sequence: GPS, zone overlap, active delivery, fraud score.">
-          <div className="overflow-hidden rounded-2xl border border-slate-800">
-            <table className="min-w-full divide-y divide-slate-800 text-sm">
-              <thead className="bg-slate-900/70">
-                <tr>
-                  <th className="px-4 py-3 text-left">Event</th>
-                  <th className="px-4 py-3 text-left">Decision</th>
-                  <th className="px-4 py-3 text-left">Payout</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-800 bg-slate-950/40">
-                {claims.length ? claims.map((claim) => (
-                  <tr key={claim._id}>
-                    <td className="px-4 py-3">{claim.eventId.eventType.replaceAll("_", " ")}</td>
-                    <td className="px-4 py-3">{claim.decision}</td>
-                    <td className="px-4 py-3">Rs {claim.cappedPayout}</td>
-                  </tr>
-                )) : (
-                  <tr>
-                    <td className="px-4 py-3 text-slate-400" colSpan="3">
-                      No claims generated yet.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </Panel>
-
-        <Panel title="Payout History" subtitle="Only paid or processed payouts appear once the backend releases them.">
-          <div className="space-y-3">
-            {payouts.length ? payouts.map((payout) => (
-              <div key={payout._id} className="rounded-2xl border border-slate-800 bg-slate-950/40 p-4">
-                <div className="flex items-center justify-between">
-                  <p className="font-semibold">{payout.claimId?.eventId?.eventType?.replaceAll("_", " ") || "Claim payout"}</p>
-                  <span className="text-sm text-slate-300">Rs {payout.amount}</span>
-                </div>
-                <p className="mt-2 text-sm text-slate-400">{payout.status}</p>
-              </div>
-            )) : <div className="rounded-2xl bg-slate-900/50 p-4 text-sm text-slate-400">No payouts yet.</div>}
-          </div>
-        </Panel>
-
-        <Panel title="Premium Payments" subtitle="Weekly premium subscriptions and renewals are recorded here.">
-          <div className="space-y-3">
-            {premiumPayments.length ? premiumPayments.map((payment) => (
-              <div key={payment._id} className="rounded-2xl border border-slate-800 bg-slate-950/40 p-4">
-                <div className="flex items-center justify-between">
-                  <p className="font-semibold">{payment.method}</p>
-                  <span className="text-sm text-slate-300">Rs {payment.amount}</span>
-                </div>
-                <p className="mt-2 text-sm text-slate-400">{payment.status}</p>
-              </div>
-            )) : <div className="rounded-2xl bg-slate-900/50 p-4 text-sm text-slate-400">No premium payments yet.</div>}
-          </div>
-        </Panel>
+          ))}
+        </div>
       </div>
 
-      <div className="space-y-6">
-        <Panel title="Edit Profile" subtitle="Update city, zone, UPI, and contact details.">
-          <form className="space-y-3" onSubmit={handleProfileSave}>
-            <input
-              className="w-full rounded-2xl border border-slate-800 bg-slate-950/50 px-4 py-3 text-white outline-none"
-              placeholder="Full name"
-              value={profileForm.name}
-              onChange={(event) => setProfileForm((current) => ({ ...current, name: event.target.value }))}
-            />
-            <input
-              className="w-full rounded-2xl border border-slate-800 bg-slate-950/50 px-4 py-3 text-white outline-none"
-              placeholder="Phone number"
-              value={profileForm.phone}
-              onChange={(event) => setProfileForm((current) => ({ ...current, phone: event.target.value }))}
-            />
-            <input
-              className="w-full rounded-2xl border border-slate-800 bg-slate-950/50 px-4 py-3 text-white outline-none"
-              placeholder="City (e.g., Kavali)"
-              value={profileForm.city}
-              onChange={(event) => setProfileForm((current) => ({ ...current, city: event.target.value }))}
-            />
-            <input
-              className="w-full rounded-2xl border border-slate-800 bg-slate-950/50 px-4 py-3 text-white outline-none"
-              placeholder="PIN code (6 digits, e.g., 524201)"
-              value={profileForm.zoneCode}
-              onChange={(event) => setProfileForm((current) => ({ ...current, zoneCode: event.target.value }))}
-            />
-            <input
-              className="w-full rounded-2xl border border-slate-800 bg-slate-950/50 px-4 py-3 text-white outline-none"
-              placeholder="UPI ID"
-              value={profileForm.upiId}
-              onChange={(event) => setProfileForm((current) => ({ ...current, upiId: event.target.value }))}
-            />
-            <input
-              className="w-full rounded-2xl border border-slate-800 bg-slate-950/50 px-4 py-3 text-white outline-none"
-              placeholder="Provider (Zomato/Swiggy)"
-              value={profileForm.provider}
-              onChange={(event) => setProfileForm((current) => ({ ...current, provider: event.target.value }))}
-            />
-            <input
-              className="w-full rounded-2xl border border-slate-800 bg-slate-950/50 px-4 py-3 text-white outline-none"
-              placeholder="Weekly earnings average"
-              value={profileForm.weeklyEarningsAverage}
-              onChange={(event) => setProfileForm((current) => ({ ...current, weeklyEarningsAverage: event.target.value }))}
-            />
-            {profileMessage ? <p className="text-sm text-emerald-300">{profileMessage}</p> : null}
-            {error ? <p className="text-sm text-rose-300">{error}</p> : null}
-            <button
-              className="w-full rounded-2xl bg-aqua px-4 py-3 font-semibold text-slate-950 disabled:opacity-60"
-              type="submit"
-              disabled={savingProfile}
-            >
-              {savingProfile ? "Saving..." : "Save profile"}
-            </button>
-          </form>
-        </Panel>
+      {activeTab === "home" ? (
+        <RiderHomeTab
+          activeAlerts={activeAlerts}
+          currentPlan={currentPlan}
+          premium={dashboard?.premium}
+          coveredToday={coveredToday}
+          zoneLabel={zoneLabel}
+          isShiftActive={isShiftActive}
+          handleShiftToggle={handleShiftToggle}
+          locationLoading={locationLoading}
+          locationMessage={locationMessage}
+          error={error}
+          coverageExplanation={coverageExplanation}
+          profileForm={profileForm}
+          setProfileForm={setProfileForm}
+          handleProfileSave={handleProfileSave}
+          savingProfile={savingProfile}
+          profileMessage={profileMessage}
+          activePolicy={activePolicy}
+          city={dashboard?.rider?.city}
+          aiPremiumInsight={aiPremiumInsight}
+        />
+      ) : null}
 
-        <Panel title="Plan Selection" subtitle="Coverage expands by calamity type, payout speed, and weekly cap.">
-          <div className="space-y-3">
-            {plans.map((plan) => (
-              <button
-                key={plan.key}
-                type="button"
-                onClick={() => handlePlanChange(plan.key)}
-                disabled={savingPlan === plan.key || currentPlan === plan.key}
-                className={`w-full rounded-2xl border p-4 text-left transition ${
-                  plan.key === currentPlan ? "border-aqua bg-aqua/10" : "border-slate-800 bg-slate-950/40"
-                }`}
-                >
-                <div className="flex items-center justify-between">
-                  <p className="font-semibold">{plan.key}</p>
-                  <span className="text-sm text-slate-300">
-                    {savingPlan === plan.key ? "Updating..." : `Rs ${plan.weeklyPremiumBase}/week`}
-                  </span>
-                </div>
-                <p className="mt-2 text-sm text-slate-400">Weekly max payout: Rs {plan.weeklyPayoutCap}</p>
-                <p className="mt-1 text-xs text-slate-500">
-                  Covers: {plan.calamityTypes.map((type) => type.replaceAll("_", " ")).join(", ")}
-                </p>
-              </button>
-            ))}
-          </div>
-        </Panel>
+      {activeTab === "policy" ? (
+        <RiderPolicyTab
+          currentPlan={currentPlan}
+          activePolicy={activePolicy}
+          subscribing={subscribing}
+          handleSubscribe={handleSubscribe}
+          policyCards={policyCards}
+          savingPlan={savingPlan}
+          handlePlanChange={handlePlanChange}
+          onPaymentSuccess={loadRiderData}
+          error={error}
+        />
+      ) : null}
 
-        <Panel title="Appeal Path" subtitle="High-risk holds request extra evidence instead of instant rejection.">
-          <form className="space-y-3" onSubmit={handleAppealSubmit}>
-            <select
-              className="w-full rounded-2xl border border-slate-800 bg-slate-950/50 px-4 py-3 text-white outline-none"
-              value={appealForm.claimId}
-              onChange={(event) => setAppealForm((current) => ({ ...current, claimId: event.target.value }))}
-              required
-              disabled={!appealableClaims.length}
-            >
-              <option value="">
-                {appealableClaims.length ? "Choose a claim to appeal" : "No appeal-eligible claims yet"}
-              </option>
-              {appealableClaims.map((claim) => (
-                <option key={claim._id} value={claim._id}>
-                  {claim.eventId.eventType.replaceAll("_", " ")} - {claim.decision}
-                </option>
-              ))}
-            </select>
-            <textarea
-              className="min-h-28 w-full rounded-2xl border border-slate-800 bg-slate-950/50 px-4 py-3 text-white outline-none"
-              placeholder="Why should this claim be reviewed again?"
-              value={appealForm.reason}
-              onChange={(event) => setAppealForm((current) => ({ ...current, reason: event.target.value }))}
-              required
-              disabled={!appealableClaims.length}
-            />
-            {!appealableClaims.length ? (
-              <p className="text-sm text-slate-400">
-                Appeals only appear after a claim is marked as `REJECTED` or `HOLD_RIDER_VERIFICATION`.
-              </p>
-            ) : null}
-            {appealMessage ? <p className="text-sm text-emerald-300">{appealMessage}</p> : null}
-            {error ? <p className="text-sm text-rose-300">{error}</p> : null}
-            <button
-              className="w-full rounded-2xl bg-aqua px-4 py-3 font-semibold text-slate-950 disabled:cursor-not-allowed disabled:opacity-60"
-              type="submit"
-              disabled={!appealableClaims.length}
-            >
-              Submit appeal
-            </button>
-          </form>
-        </Panel>
+      {activeTab === "claims" ? (
+        <RiderClaimsTab
+          claims={claims}
+          appealableClaims={appealableClaims}
+          appealForm={appealForm}
+          setAppealForm={setAppealForm}
+          handleAppealSubmit={handleAppealSubmit}
+          appealMessage={appealMessage}
+          complaintForm={complaintForm}
+          setComplaintForm={setComplaintForm}
+          handleComplaintSubmit={handleComplaintSubmit}
+          complaintMessage={complaintMessage}
+          complaints={complaints}
+          appeals={appeals}
+          claimsForComplaint={claims}
+          premiumPayments={premiumPayments}
+          error={error}
+        />
+      ) : null}
 
-        <Panel title="Complaints" subtitle="Riders can raise service complaints like delays or wrong calculations.">
-          <form className="space-y-3" onSubmit={handleComplaintSubmit}>
-            <select
-              className="w-full rounded-2xl border border-slate-800 bg-slate-950/50 px-4 py-3 text-white outline-none"
-              value={complaintForm.category}
-              onChange={(event) => setComplaintForm((current) => ({ ...current, category: event.target.value }))}
-            >
-              <option value="PAYMENT_DELAY">Payment delay</option>
-              <option value="WRONG_CALCULATION">Wrong calculation</option>
-              <option value="TECHNICAL_ISSUE">Technical issue</option>
-              <option value="OTHER">Other</option>
-            </select>
-            <input
-              className="w-full rounded-2xl border border-slate-800 bg-slate-950/50 px-4 py-3 text-white outline-none"
-              placeholder="Complaint subject"
-              value={complaintForm.subject}
-              onChange={(event) => setComplaintForm((current) => ({ ...current, subject: event.target.value }))}
-              required
-            />
-            <textarea
-              className="min-h-28 w-full rounded-2xl border border-slate-800 bg-slate-950/50 px-4 py-3 text-white outline-none"
-              placeholder="Describe the issue"
-              value={complaintForm.message}
-              onChange={(event) => setComplaintForm((current) => ({ ...current, message: event.target.value }))}
-              required
-            />
-            {complaintMessage ? <p className="text-sm text-emerald-300">{complaintMessage}</p> : null}
-            {error ? <p className="text-sm text-rose-300">{error}</p> : null}
-            <button className="w-full rounded-2xl bg-aqua px-4 py-3 font-semibold text-slate-950" type="submit">
-              Submit complaint
-            </button>
-          </form>
+      {activeTab === "payouts" ? <RiderPayoutsTab payouts={payouts} premiumPayments={premiumPayments} /> : null}
 
-          <div className="mt-4 space-y-3">
-            {complaints.length ? complaints.map((complaint) => (
-              <div key={complaint._id} className="rounded-2xl bg-slate-950/40 p-4">
-                <div className="flex items-center justify-between">
-                  <p className="font-semibold">{complaint.subject}</p>
-                  <span className="text-sm text-slate-300">{complaint.status}</span>
-                </div>
-                <p className="mt-2 text-sm text-slate-400">{complaint.category.replaceAll("_", " ")}</p>
-              </div>
-            )) : <div className="rounded-2xl bg-slate-900/50 p-4 text-sm text-slate-400">No complaints raised yet.</div>}
-          </div>
-        </Panel>
-
-        <Panel title="Appeal Tracking" subtitle="Open and resolved appeals are visible to the rider.">
-          <div className="space-y-3">
-            {appeals.length ? appeals.map((appeal) => (
-              <div key={appeal._id} className="rounded-2xl bg-slate-950/40 p-4">
-                <div className="flex items-center justify-between">
-                  <p className="font-semibold">{appeal.claimId?._id ? `Claim ${appeal.claimId._id}` : "Appeal"}</p>
-                  <span className="text-sm text-slate-300">{appeal.status}</span>
-                </div>
-                <p className="mt-2 text-sm text-slate-400">{appeal.reason}</p>
-              </div>
-            )) : <div className="rounded-2xl bg-slate-900/50 p-4 text-sm text-slate-400">No appeals filed yet.</div>}
-          </div>
-        </Panel>
-      </div>
+      {activeTab === "profile" ? (
+        <RiderProfileTabV2
+          profileForm={profileForm}
+          setProfileForm={setProfileForm}
+          identityMeta={identityMeta}
+          profileMessage={profileMessage}
+          error={error}
+          handleProfileSave={handleProfileSave}
+          savingProfile={savingProfile}
+          logout={logout}
+        />
+      ) : null}
     </div>
   );
 }

@@ -10,8 +10,8 @@ import { Policy } from "../models/Policy.js";
 import { PremiumPayment } from "../models/PremiumPayment.js";
 import { AdminSetting } from "../models/AdminSetting.js";
 import { PLAN_CONFIG } from "../constants/plans.js";
-import { ingestSocialEvent, ingestWeatherEvents, processApprovedEvent, runAutomaticWeatherSync } from "./eventDetectionService.js";
-import { releasePayoutForClaim } from "./payoutService.js";
+import { fetchExternalSignalsSummary, ingestSocialEvent, ingestWeatherEvents, processApprovedEvent, runAutomaticWeatherSync } from "./eventDetectionService.js";
+import { createAdjustmentPayout, releasePayoutForClaim } from "./payoutService.js";
 import { ApiError } from "../utils/ApiError.js";
 import { ALL_STATES, deriveStateFromCity, listStatesFromCities } from "../utils/geography.js";
 import { PIN_GEO_MAP } from "../utils/pincode.js";
@@ -63,6 +63,15 @@ function getEligibilityLabel(claim) {
   }
 
   return Object.values(claim.eligibilityChecks).every(Boolean) ? "VERIFIED" : "INELIGIBLE";
+}
+
+function buildSeverity(eventType, snapshot) {
+  if (eventType === "CYCLONE") return { label: "SEVERE", factor: 1.5 };
+  if (eventType === "FLOOD") return { label: "HIGH", factor: 1.3 };
+  if (eventType === "EARTHQUAKE") return { label: "HIGH", factor: snapshot.magnitude >= 6 ? 1.5 : 1.25 };
+  if (eventType === "EXTREME_HEAT") return { label: "MODERATE", factor: 1.15 };
+  if (eventType === "SEVERE_POLLUTION") return { label: "MODERATE", factor: 1.1 };
+  return { label: "MODERATE", factor: 1.0 };
 }
 
 function generateWeeklySeries({ payments = [], payouts = [] }) {
@@ -133,6 +142,35 @@ function normalizeNotificationChannels(value) {
   };
 }
 
+function minutesSince(value) {
+  if (!value) return null;
+  return Math.max(0, Math.round((Date.now() - new Date(value).getTime()) / 60000));
+}
+
+function deriveLatencyMs(lastUpdatedAt, baseline = 180) {
+  const ageMinutes = minutesSince(lastUpdatedAt);
+  if (ageMinutes === null) return null;
+  return Math.min(2400, baseline + ageMinutes * 9);
+}
+
+function toSourceStatus({ connected, lastUpdatedAt, healthyWindowMinutes = 180, onlineLabel = "ONLINE", degradedLabel = "DEGRADED", offlineLabel = "OFFLINE" }) {
+  if (!connected) {
+    return offlineLabel;
+  }
+
+  const ageMinutes = minutesSince(lastUpdatedAt);
+  if (ageMinutes === null) {
+    return degradedLabel;
+  }
+
+  return ageMinutes <= healthyWindowMinutes ? onlineLabel : degradedLabel;
+}
+
+function average(numbers = []) {
+  if (!numbers.length) return 0;
+  return numbers.reduce((total, value) => total + value, 0) / numbers.length;
+}
+
 export async function getAdminDashboard(adminUserId, requestedState) {
   const adminUser = await User.findById(adminUserId);
   if (!adminUser) {
@@ -172,7 +210,8 @@ export async function getAdminDashboard(adminUserId, requestedState) {
     appealsRaw,
     complaintsRaw,
     policiesRaw,
-    premiumPaymentsRaw
+    premiumPaymentsRaw,
+    signalSummary
   ] = await Promise.all([
     RiderProfile.find().populate("userId").lean(),
     Event.find().sort({ detectedAt: -1 }).lean(),
@@ -180,9 +219,15 @@ export async function getAdminDashboard(adminUserId, requestedState) {
     Payout.find().sort({ createdAt: -1 }).populate("claimId riderId").lean(),
     FraudLog.find().sort({ createdAt: -1 }).populate("riderId eventId claimId").lean(),
     Appeal.find().sort({ createdAt: -1 }).populate({ path: "claimId", populate: { path: "eventId" } }).lean(),
-    Complaint.find().sort({ createdAt: -1 }).populate("riderId").lean(),
+    Complaint.find()
+      .sort({ createdAt: -1 })
+      .populate({ path: "riderId", populate: { path: "userId" } })
+      .populate({ path: "relatedClaimId", populate: { path: "eventId" } })
+      .populate("adjustmentPayoutId")
+      .lean(),
     Policy.find().sort({ createdAt: -1 }).lean(),
-    PremiumPayment.find().sort({ createdAt: -1 }).lean()
+    PremiumPayment.find().sort({ createdAt: -1 }).lean(),
+    fetchExternalSignalsSummary()
   ]);
 
   const availableStates = listStatesFromCities([
@@ -399,6 +444,194 @@ export async function getAdminDashboard(adminUserId, requestedState) {
     actionTaken: event.adminDecision?.note || (event.status === "APPROVED" ? "Auto-confirmed" : "Awaiting action")
   }));
 
+  const latestWeatherEvent = events.find((event) => event.sourceType === "WEATHER");
+  const latestSocialEvent = events.find((event) => event.sourceType === "SOCIAL");
+  const latestPlatformTouch = riders
+    .map((rider) => rider.updatedAt || rider.declaredShift?.startedAt || rider.createdAt)
+    .filter(Boolean)
+    .sort((left, right) => new Date(right).getTime() - new Date(left).getTime())[0];
+  const activeShiftCount = shiftActivity.filter((shift) => shift.shiftActive).length;
+  const pendingPayoutReviews = payoutQueue.filter((item) => ["ADMIN_REVIEW", "HOLD_RIDER_VERIFICATION"].includes(item.decision)).length;
+  const pendingSocialAlerts = events.filter((event) => event.sourceType === "SOCIAL" && ["DETECTED", "PENDING_ADMIN_APPROVAL"].includes(event.status));
+  const recentClaimProcessingTimes = claims
+    .filter((claim) => claim.eventId?.detectedAt && claim.createdAt)
+    .slice(0, 20)
+    .map((claim) => Math.max(0, new Date(claim.createdAt).getTime() - new Date(claim.eventId.detectedAt).getTime()));
+  const verifiedClaimRatio = claims.length
+    ? claims.filter((claim) => getEligibilityLabel(claim) === "VERIFIED").length / claims.length
+    : 0;
+  const confidenceScore = Number(
+    Math.min(
+      99.4,
+      70 + verifiedClaimRatio * 18 + (recentTriggerFeed.length ? activeEvents.length / recentTriggerFeed.length : 0) * 8 + (pendingSocialAlerts.length ? 2 : 5)
+    ).toFixed(1)
+  );
+  const riderGrowthCurrent = riders.filter((rider) => new Date(rider.createdAt).getTime() >= Date.now() - 30 * 24 * 60 * 60 * 1000).length;
+  const riderGrowthPrevious = riders.filter((rider) => {
+    const createdAt = new Date(rider.createdAt).getTime();
+    const now = Date.now();
+    return createdAt < now - 30 * 24 * 60 * 60 * 1000 && createdAt >= now - 60 * 24 * 60 * 60 * 1000;
+  }).length;
+  const riderGrowthPct = riderGrowthPrevious
+    ? Number((((riderGrowthCurrent - riderGrowthPrevious) / riderGrowthPrevious) * 100).toFixed(1))
+    : riderGrowthCurrent > 0
+      ? 100
+      : 0;
+
+  const dataSourceHealth = [
+    {
+      key: "WEATHER_API",
+      label: "Weather API",
+      status: toSourceStatus({
+        connected: Boolean(signalSummary?.configured),
+        lastUpdatedAt: latestWeatherEvent?.detectedAt,
+        healthyWindowMinutes: 240
+      }),
+      latencyMs: deriveLatencyMs(latestWeatherEvent?.detectedAt, 220),
+      lastUpdatedAt: latestWeatherEvent?.detectedAt || null,
+      note: signalSummary?.weatherReachable
+        ? (latestWeatherEvent ? `${getTriggerLabel(latestWeatherEvent.eventType)} processed for ${latestWeatherEvent.zoneCode}` : "Waiting for the next verified weather trigger.")
+        : "OpenWeather is configured but was not reachable during the latest backend check."
+    },
+    {
+      key: "PLATFORM_API",
+      label: "Platform API",
+      status: toSourceStatus({
+        connected: riders.length > 0,
+        lastUpdatedAt: latestPlatformTouch,
+        healthyWindowMinutes: 180,
+        onlineLabel: activeShiftCount > 0 ? "SYNCED" : "ONLINE",
+        degradedLabel: "DELAYED",
+        offlineLabel: "OFFLINE"
+      }),
+      latencyMs: deriveLatencyMs(latestPlatformTouch, 180),
+      lastUpdatedAt: latestPlatformTouch || null,
+      note: `${activeShiftCount} active shifts currently feeding delivery telemetry.`
+    },
+    {
+      key: "NEWS_API",
+      label: "News API",
+      status: toSourceStatus({
+        connected: Boolean(latestSocialEvent),
+        lastUpdatedAt: latestSocialEvent?.detectedAt,
+        healthyWindowMinutes: 720,
+        onlineLabel: "MONITORING",
+        degradedLabel: "QUIET",
+        offlineLabel: "OFFLINE"
+      }),
+      latencyMs: deriveLatencyMs(latestSocialEvent?.detectedAt, 260),
+      lastUpdatedAt: latestSocialEvent?.detectedAt || null,
+      note: latestSocialEvent ? `${getTriggerLabel(latestSocialEvent.eventType)} spotted in ${latestSocialEvent.city}` : "No recent social disruption ingestions yet."
+    },
+    {
+      key: "FRAUD_MODEL",
+      label: "Fraud Model",
+      status: signalSummary?.fraudModel?.reachable ? "ONLINE" : "FALLBACK",
+      latencyMs: null,
+      lastUpdatedAt: new Date(),
+      note: signalSummary?.fraudModel?.reachable
+        ? `${signalSummary.fraudModel.modelName} (${signalSummary.fraudModel.modelVersion}) is scoring live fraud requests.`
+        : signalSummary?.fraudModel?.note || "Fallback rule scoring is active."
+    }
+  ];
+
+  const logicEngine = {
+    updatedAt: latestWeatherEvent?.detectedAt || latestSocialEvent?.detectedAt || new Date(),
+    confidenceScore,
+    processingTimeMs: Math.round(average(recentClaimProcessingTimes)),
+    activeRules: [
+      { keyword: "IF", text: `weather severity crosses ${settings.triggerThresholds.heavyRainLevel} or AQI exceeds ${settings.triggerThresholds.severePollutionAqi}` },
+      { keyword: "AND", text: `${activeShiftCount} rider shifts and ${pendingSocialAlerts.length} pending social alerts are cross-checked against zone overlap and ${signalSummary?.fraudModel?.scoringMode === "ML_SERVICE" ? "live ML fraud scoring" : "backend fallback fraud rules"}` },
+      { keyword: "THEN", text: `create protected trigger for ${activeEvents.length} active zones and route ${pendingPayoutReviews} cases into review` }
+    ]
+  };
+
+  const socialTriggerPanel = pendingSocialAlerts.slice(0, 12).map((event) => {
+    const affectedRiders = riders
+      .filter((rider) => rider.zoneCode === event.zoneCode)
+      .slice(0, 6)
+      .map((rider) => ({
+        _id: rider._id,
+        name: rider.userId?.name || "Unknown rider",
+        plan: rider.plan,
+        shiftActive: Boolean(rider.declaredShift?.active),
+        city: rider.city
+      }));
+
+    return {
+      _id: event._id,
+      title: `${getTriggerLabel(event.eventType)} in ${event.city}`,
+      source: event.triggerSource,
+      sourceType: event.sourceType,
+      status: event.status,
+      locationLabel: `${event.city} / ${event.zoneCode}`,
+      city: event.city,
+      zoneCode: event.zoneCode,
+      impactProjection: {
+        affectedRiders: riders.filter((rider) => rider.zoneCode === event.zoneCode).length,
+        confidence: Number(Math.min(99, 62 + event.severity.factor * 12).toFixed(1)),
+        projectedDropPercent: Math.round(event.severity.factor * 12)
+      },
+      summary: event.adminDecision?.note || `${event.triggerSource} pushed this event for manual confirmation.`,
+      detectedAt: event.detectedAt,
+      center: event.center,
+      severity: event.severity,
+      affectedRiders
+    };
+  });
+
+  const activityFeed = [
+    ...payouts.slice(0, 6).map((payout) => ({
+      _id: `payout-${payout._id}`,
+      type: "PAYOUT",
+      title: `Payout ${payout.status.toLowerCase()} for ${formatCurrencyValue(payout.amount)}`,
+      detail: payout.riderId?.userId?.name || payout.riderId?.city || "Rider payment update",
+      timestamp: payout.createdAt,
+      tone: payout.status === "PAID" ? "SUCCESS" : payout.status
+    })),
+    ...fraudLogs.slice(0, 6).map((entry) => ({
+      _id: `fraud-${entry._id}`,
+      type: "FRAUD",
+      title: `${entry.riskTier} fraud signal detected`,
+      detail: entry.explanation?.join(", ") || "Risk engine raised a manual review flag",
+      timestamp: entry.createdAt,
+      tone: entry.riskTier
+    })),
+    ...recentTriggerFeed.slice(0, 6).map((event) => ({
+      _id: `trigger-${event._id}`,
+      type: "TRIGGER",
+      title: `${getTriggerLabel(event.eventType)} trigger received`,
+      detail: `${event.city} / ${event.zoneCode}`,
+      timestamp: event.detectedAt,
+      tone: event.status
+    })),
+    ...riders.slice(0, 4).map((rider) => ({
+      _id: `rider-${rider._id}`,
+      type: "RIDER",
+      title: "New rider onboarded",
+      detail: rider.userId?.name || rider.city || "Rider profile added",
+      timestamp: rider.createdAt,
+      tone: rider.userId?.aadhaarVerified ? "VERIFIED" : "PENDING"
+    }))
+  ]
+    .sort((left, right) => new Date(right.timestamp).getTime() - new Date(left.timestamp).getTime())
+    .slice(0, 12);
+
+  const riderStats = {
+    growthPct: riderGrowthPct,
+    totalVerified: riders.filter((rider) => rider.userId?.aadhaarVerified).length,
+    pendingKyc: riders.filter((rider) => !rider.userId?.aadhaarVerified).length,
+    activeClaims: claims.filter((claim) => ["ADMIN_REVIEW", "HOLD_RIDER_VERIFICATION", "APPROVED"].includes(claim.decision)).length
+  };
+
+  const alertConfirmation = socialTriggerPanel[0]
+    ? {
+        ...socialTriggerPanel[0],
+        mapSummary: `Impact map centered at ${socialTriggerPanel[0].city} / ${socialTriggerPanel[0].zoneCode}`,
+        automatedResponse: `Protection filters will evaluate ${socialTriggerPanel[0].impactProjection.affectedRiders} riders in this zone immediately after confirmation.`
+      }
+    : null;
+
   const settingsPayload = {
     triggerThresholds: settings.triggerThresholds,
     payoutCaps: settings.payoutCaps,
@@ -406,12 +639,10 @@ export async function getAdminDashboard(adminUserId, requestedState) {
     reserveBufferTarget: settings.reserveBufferTarget,
     safePoolThreshold: settings.safePoolThreshold,
     autoApproveLowRisk: settings.autoApproveLowRisk,
-    apiStatus: {
-      openWeather: process.env.OPENWEATHER_API_KEY ? "REACHABLE" : "DOWN",
-      socialFeed: "MANUAL_ONLY",
-      platformFeed: "SIMULATED",
-      earthquakeFeed: "REACHABLE"
-    },
+    apiStatus: dataSourceHealth.reduce((result, source) => ({
+      ...result,
+      [source.key]: source.status
+    }), {}),
     adminUsers: [
       {
         _id: adminUser._id,
@@ -440,6 +671,14 @@ export async function getAdminDashboard(adminUserId, requestedState) {
       totalPayoutsThisWeek: formatCurrencyValue(totalPayoutsThisWeek),
       premiumPoolBalance: formatCurrencyValue(premiumPoolBalance)
     },
+    generatedAt: new Date(),
+    systemStatus: {
+      label: dataSourceHealth.every((source) => ["ONLINE", "SYNCED", "MONITORING"].includes(source.status)) ? "Monitoring Active" : "Needs Attention",
+      note: `${pendingSocialAlerts.length} social alerts pending confirmation and ${pendingPayoutReviews} payout reviews waiting.`,
+      lastUpdatedAt: new Date(),
+      healthyFeeds: dataSourceHealth.filter((source) => !["OFFLINE", "DOWN"].includes(source.status)).length,
+      totalFeeds: dataSourceHealth.length
+    },
     recentTriggerFeed: recentTriggerFeed.map((event) => ({
       _id: event._id,
       eventType: event.eventType,
@@ -448,7 +687,10 @@ export async function getAdminDashboard(adminUserId, requestedState) {
       city: event.city,
       zoneCode: event.zoneCode,
       status: event.status,
-      detectedAt: event.detectedAt
+      detectedAt: event.detectedAt,
+      sourceType: event.sourceType,
+      triggerSource: event.triggerSource,
+      eligibleRiders: (claimsByEventId.get(event._id.toString()) || []).filter((claim) => getEligibilityLabel(claim) !== "INELIGIBLE").length
     })),
     mapTriggers: activeEvents.map((event) => ({
       _id: event._id,
@@ -463,6 +705,11 @@ export async function getAdminDashboard(adminUserId, requestedState) {
     })),
     activeEvents,
     triggerManagement,
+    socialTriggerPanel,
+    logicEngine,
+    dataSourceHealth,
+    activityFeed,
+    alertConfirmation,
     triggerHistory: events.slice(0, 100).map((event) => ({
       _id: event._id,
       eventType: event.eventType,
@@ -475,6 +722,7 @@ export async function getAdminDashboard(adminUserId, requestedState) {
     })),
     payoutQueue,
     riderManagement,
+    riderStats,
     fraudManagement: {
       flags: fraudFlags,
       clusterAlerts,
@@ -581,7 +829,7 @@ export async function reviewAppeal(appealId, approved, resolutionNote) {
   return { appeal, payout };
 }
 
-export async function reviewComplaint(complaintId, approved, resolutionNote) {
+export async function reviewComplaint(complaintId, approved, resolutionNote, adjustmentAmount = 0) {
   const complaint = await Complaint.findById(complaintId);
   if (!complaint) {
     throw new ApiError(404, "Complaint not found");
@@ -589,9 +837,25 @@ export async function reviewComplaint(complaintId, approved, resolutionNote) {
 
   complaint.status = approved ? "RESOLVED" : "REJECTED";
   complaint.resolutionNote = resolutionNote;
+  complaint.adjustmentAmount = 0;
+
+  let payout = null;
+  const normalizedAdjustment = Number(adjustmentAmount || 0);
+  if (approved && complaint.category === "WRONG_CALCULATION" && normalizedAdjustment > 0) {
+    payout = await createAdjustmentPayout({
+      riderId: complaint.riderId,
+      amount: normalizedAdjustment,
+      claimId: complaint.relatedClaimId || null,
+      complaintId: complaint._id,
+      description: "Adjustment credited after complaint review"
+    });
+    complaint.adjustmentAmount = normalizedAdjustment;
+    complaint.adjustmentPayoutId = payout?._id || null;
+  }
+
   await complaint.save();
 
-  return complaint;
+  return { complaint, payout };
 }
 
 export async function triggerAutomaticWeatherSync() {

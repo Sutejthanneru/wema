@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 
-from app.models.schemas import FraudScoreRequest, FraudScoreResponse
+from app.models.schemas import FraudModelInfoResponse, FraudScoreRequest, FraudScoreResponse
 from app.services.scoring import FraudScoringService
 
 app = FastAPI(title="WEMA Fraud Service", version="1.0.0")
@@ -16,3 +16,9 @@ def health():
 def score(payload: FraudScoreRequest):
     result = service.score(payload)
     return FraudScoreResponse(**result)
+
+
+@app.get("/fraud-model-info", response_model=FraudModelInfoResponse)
+def fraud_model_info():
+    result = service.model_info()
+    return FraudModelInfoResponse(**result)

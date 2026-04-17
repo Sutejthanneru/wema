@@ -8,16 +8,66 @@ import { Complaint } from "../models/Complaint.js";
 import { Policy } from "../models/Policy.js";
 import { PremiumPayment } from "../models/PremiumPayment.js";
 import { PLAN_CONFIG } from "../constants/plans.js";
-import { calculatePremium, computeZoneRiskScore } from "./premiumService.js";
+import { calculatePremium, computeZoneRiskScore, computeConsistencyScore } from "./premiumService.js";
+import { generatePremiumInsight } from "./aiPremiumService.js";
 import { ApiError } from "../utils/ApiError.js";
 import { cityFromPin, isValidPin, normalizePin, PIN_GEO_MAP } from "../utils/pincode.js";
 import { buildCirclePolygon } from "../utils/geo.js";
 import { normalizeCity } from "../utils/geography.js";
 
+function buildAlertQuery(rider) {
+  return {
+    zoneCode: rider.zoneCode,
+    status: { $in: ["APPROVED", "PROCESSING", "COMPLETED"] }
+  };
+}
+
+async function findEffectiveActivePolicy(riderId) {
+  const now = new Date();
+
+  const activePolicy = await Policy.findOne({ riderId, status: "ACTIVE" })
+    .sort({ createdAt: -1 })
+    .lean();
+
+  if (activePolicy) {
+    return activePolicy;
+  }
+
+  const inWindowPolicy = await Policy.findOne({
+    riderId,
+    status: { $ne: "CANCELLED" },
+    coverageStart: { $lte: now },
+    coverageEnd: { $gte: now }
+  })
+    .sort({ createdAt: -1 })
+    .lean();
+
+  if (!inWindowPolicy) {
+    return null;
+  }
+
+  if (inWindowPolicy.status !== "ACTIVE") {
+    await Policy.updateOne(
+      { _id: inWindowPolicy._id },
+      { $set: { status: "ACTIVE" } }
+    );
+  }
+
+  return {
+    ...inWindowPolicy,
+    status: "ACTIVE"
+  };
+}
+
 async function ensurePolicy({ rider, premium, autoRenew = false }) {
   const now = new Date();
   const coverageEnd = new Date(now);
   coverageEnd.setDate(coverageEnd.getDate() + 7);
+
+  // Calculate lock-in expiry date
+  const lockInMonths = PLAN_CONFIG[rider.plan]?.lockInMonths || 2;
+  const lockInExpiryAt = new Date(now);
+  lockInExpiryAt.setMonth(lockInExpiryAt.getMonth() + lockInMonths);
 
   await Policy.updateMany(
     { riderId: rider._id, status: "ACTIVE" },
@@ -35,7 +85,12 @@ async function ensurePolicy({ rider, premium, autoRenew = false }) {
     coverageEnd,
     lastPaymentAt: now,
     nextRenewalAt: coverageEnd,
-    planSnapshot: PLAN_CONFIG[rider.plan]
+    planSnapshot: PLAN_CONFIG[rider.plan],
+    // Lock-in period fields
+    activatedAt: now,
+    lockInMonths: lockInMonths,
+    lockInExpiryAt: lockInExpiryAt,
+    canChangeAfter: lockInExpiryAt
   });
 
   const premiumPayment = await PremiumPayment.create({
@@ -51,6 +106,51 @@ async function ensurePolicy({ rider, premium, autoRenew = false }) {
   return { policy, premiumPayment };
 }
 
+async function buildPremiumQuote(rider, overrides = {}) {
+  const premiumContext = {
+    plan: overrides.plan || rider.plan,
+    zoneCode: overrides.zoneCode || rider.zoneCode,
+    city: overrides.city || rider.city,
+    weeklyEarningsAverage:
+      overrides.weeklyEarningsAverage !== undefined
+        ? Number(overrides.weeklyEarningsAverage)
+        : rider.weeklyEarningsAverage || 3500
+  };
+
+  const zoneRiskScore = await computeZoneRiskScore({
+    zoneCode: premiumContext.zoneCode,
+    city: premiumContext.city,
+    planKey: premiumContext.plan
+  });
+
+  const consistencyScore = await computeConsistencyScore({ riderId: rider._id });
+
+  const premium = calculatePremium({
+    weeklyIncome: premiumContext.weeklyEarningsAverage,
+    zoneRiskScore,
+    planKey: premiumContext.plan,
+    consistencyScore
+  });
+
+  const premiumRider = {
+    ...rider.toObject(),
+    ...premiumContext
+  };
+
+  const aiPremiumInsight = await generatePremiumInsight({
+    rider: premiumRider,
+    premium,
+    zoneRiskScore,
+    consistencyScore
+  });
+
+  return {
+    premium,
+    aiPremiumInsight,
+    quoteInputs: premiumContext
+  };
+}
+
 export async function getRiderDashboard(userId) {
   const rider = await RiderProfile.findOne({ userId }).populate("userId");
   if (!rider) {
@@ -58,26 +158,16 @@ export async function getRiderDashboard(userId) {
   }
 
   const [activeAlerts, recentClaims, recentPayouts, appeals, complaints, activePolicy, premiumPayments] = await Promise.all([
-    Event.find({ city: rider.city, status: { $in: ["APPROVED", "PROCESSING"] } }).sort({ detectedAt: -1 }).limit(5).lean(),
+    Event.find({ ...buildAlertQuery(rider), status: { $in: ["APPROVED", "PROCESSING"] } }).sort({ detectedAt: -1 }).limit(5).lean(),
     Claim.find({ riderId: rider._id }).sort({ createdAt: -1 }).limit(5).populate("eventId").lean(),
-    Payout.find({ riderId: rider._id }).sort({ createdAt: -1 }).limit(5).lean(),
+    Payout.find({ riderId: rider._id }).sort({ createdAt: -1 }).limit(5).populate({ path: "claimId", populate: { path: "eventId" } }).lean(),
     Appeal.find({ riderId: rider._id }).sort({ createdAt: -1 }).limit(5).populate("claimId").lean(),
-    Complaint.find({ riderId: rider._id }).sort({ createdAt: -1 }).limit(5).lean(),
-    Policy.findOne({ riderId: rider._id, status: "ACTIVE" }).sort({ createdAt: -1 }).lean(),
+    Complaint.find({ riderId: rider._id }).sort({ createdAt: -1 }).limit(5).populate("relatedClaimId adjustmentPayoutId").lean(),
+    findEffectiveActivePolicy(rider._id),
     PremiumPayment.find({ riderId: rider._id }).sort({ createdAt: -1 }).limit(5).lean()
   ]);
 
-  const zoneRiskScore = await computeZoneRiskScore({
-    zoneCode: rider.zoneCode,
-    city: rider.city,
-    planKey: rider.plan
-  });
-
-  const premium = calculatePremium({
-    weeklyIncome: rider.weeklyEarningsAverage || 3500,
-    zoneRiskScore,
-    planKey: rider.plan
-  });
+  const { premium, aiPremiumInsight } = await buildPremiumQuote(rider);
 
   const eligibilityStatus = {
     coveredToday: activeAlerts.some((alert) => PLAN_CONFIG[rider.plan]?.calamityTypes.includes(alert.eventType)),
@@ -96,7 +186,8 @@ export async function getRiderDashboard(userId) {
     complaints,
     eligibilityStatus,
     activePolicy,
-    premiumPayments
+    premiumPayments,
+    aiPremiumInsight
   };
 }
 
@@ -105,24 +196,34 @@ export async function updatePlan(userId, plan) {
     throw new ApiError(400, "Invalid plan selected");
   }
 
-  const rider = await RiderProfile.findOneAndUpdate({ userId }, { plan }, { new: true });
+  // Check if there's an active policy with lock-in period
+  const rider = await RiderProfile.findOne({ userId });
   if (!rider) {
     throw new ApiError(404, "Rider profile not found");
   }
 
-  const zoneRiskScore = await computeZoneRiskScore({
-    zoneCode: rider.zoneCode,
-    city: rider.city,
-    planKey: rider.plan
-  });
+  const activePolicy = await findEffectiveActivePolicy(rider._id);
+
+  // If there's an active policy, check lock-in period
+  if (activePolicy) {
+    const now = new Date();
+    const lockInExpiryTime = new Date(activePolicy.lockInExpiryAt).getTime();
+    const nowTime = now.getTime();
+
+    if (nowTime < lockInExpiryTime) {
+      const daysRemaining = Math.ceil((lockInExpiryTime - nowTime) / (1000 * 60 * 60 * 24));
+      throw new ApiError(400, `Cannot change plan. Lock-in period expires in ${daysRemaining} days. Current plan: ${activePolicy.planKey}`);
+    }
+  }
+
+  const updatedRider = await RiderProfile.findOneAndUpdate({ userId }, { plan }, { new: true });
+
+  const { premium, aiPremiumInsight } = await buildPremiumQuote(updatedRider);
 
   return {
-    rider,
-    premium: calculatePremium({
-      weeklyIncome: rider.weeklyEarningsAverage || 3500,
-      zoneRiskScore,
-      planKey: rider.plan
-    })
+    rider: updatedRider,
+    premium,
+    aiPremiumInsight
   };
 }
 
@@ -141,17 +242,7 @@ export async function subscribePolicy(userId, payload = {}) {
     await rider.save();
   }
 
-  const zoneRiskScore = await computeZoneRiskScore({
-    zoneCode: rider.zoneCode,
-    city: rider.city,
-    planKey: rider.plan
-  });
-
-  const premium = calculatePremium({
-    weeklyIncome: rider.weeklyEarningsAverage || 3500,
-    zoneRiskScore,
-    planKey: rider.plan
-  });
+  const { premium, aiPremiumInsight } = await buildPremiumQuote(rider);
 
   const subscription = await ensurePolicy({
     rider,
@@ -163,8 +254,18 @@ export async function subscribePolicy(userId, payload = {}) {
     rider,
     premium,
     policy: subscription.policy,
-    premiumPayment: subscription.premiumPayment
+    premiumPayment: subscription.premiumPayment,
+    aiPremiumInsight
   };
+}
+
+export async function getRiderPremiumQuote(userId, payload = {}) {
+  const rider = await RiderProfile.findOne({ userId });
+  if (!rider) {
+    throw new ApiError(404, "Rider profile not found");
+  }
+
+  return buildPremiumQuote(rider, payload);
 }
 
 export async function getAlerts(userId) {
@@ -173,10 +274,7 @@ export async function getAlerts(userId) {
     throw new ApiError(404, "Rider profile not found");
   }
 
-  return Event.find({
-    $or: [{ city: rider.city }, { zoneCode: rider.zoneCode }],
-    status: { $in: ["APPROVED", "PROCESSING", "COMPLETED"] }
-  }).sort({ detectedAt: -1 }).limit(20).lean();
+  return Event.find(buildAlertQuery(rider)).sort({ detectedAt: -1 }).limit(20).lean();
 }
 
 export async function getPayoutHistory(userId) {
@@ -188,6 +286,7 @@ export async function getPayoutHistory(userId) {
   return Payout.find({ riderId: rider._id })
     .sort({ createdAt: -1 })
     .populate({ path: "claimId", populate: { path: "eventId" } })
+    .populate("complaintId")
     .lean();
 }
 
@@ -247,8 +346,18 @@ export async function createComplaint(userId, payload) {
     throw new ApiError(400, "Too many open complaints. Please wait for review.");
   }
 
+  let relatedClaimId;
+  if (payload.relatedClaimId) {
+    const relatedClaim = await Claim.findOne({ _id: payload.relatedClaimId, riderId: rider._id });
+    if (!relatedClaim) {
+      throw new ApiError(400, "Selected claim was not found for this rider");
+    }
+    relatedClaimId = relatedClaim._id;
+  }
+
   return Complaint.create({
     riderId: rider._id,
+    relatedClaimId,
     category: payload.category,
     subject: payload.subject,
     message: payload.message
